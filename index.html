@@ -266,12 +266,30 @@ function shapeFor(type) {
 // (faces opposées appariées), enveloppe convexe des points, puis polyèdre dual :
 // chaque point devient une face, chaque triangle de l'enveloppe un sommet.
 function zocchiTriangles() {
-  const P = [], N = 50, ga = Math.PI * (3 - Math.sqrt(5));
+  const N = 50, ga = Math.PI * (3 - Math.sqrt(5)), H = [];
   for (let i = 0; i < N; i++) {
     const y = 1 - (i + 0.5) / N, r = Math.sqrt(1 - y * y), t = i * ga;
-    const p = new THREE.Vector3(r * Math.cos(t), y, r * Math.sin(t));
-    P.push(p, p.clone().negate());
+    H.push(new THREE.Vector3(r * Math.cos(t), y, r * Math.sin(t)));
   }
+  // Répartition uniforme (problème de Thomson) : chaque point repousse les autres et leurs
+  // opposés, ce qui garde les paires de faces opposées tout en rendant les facettes régulières
+  // (surtout des hexagones, quelques pentagones, comme une balle de golf).
+  const f = H.map(() => new THREE.Vector3()), dv = new THREE.Vector3();
+  for (let it = 0; it < 400; it++) {
+    f.forEach(v => v.set(0, 0, 0));
+    for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) for (const sg of [1, -1]) {
+      if (i === j && sg === 1) continue;
+      dv.copy(H[j]).multiplyScalar(sg).negate().add(H[i]);       // H[i] − (±H[j])
+      const d2 = dv.lengthSq();
+      f[i].addScaledVector(dv, 1 / (d2 * Math.sqrt(d2)));
+    }
+    let mx = 0;
+    f.forEach((v, i) => { v.addScaledVector(H[i], -v.dot(H[i])); mx = Math.max(mx, v.length()); });
+    const step = 0.03 * (1 - it / 400) / mx;
+    H.forEach((p, i) => p.addScaledVector(f[i], step).normalize());
+  }
+  const P = [];
+  H.forEach(p => P.push(p, p.clone().negate()));
   const n = P.length, hull = [], tmp = new THREE.Vector3(), tmp2 = new THREE.Vector3();
   for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) for (let k = j + 1; k < n; k++) {
     const nrm = tmp.subVectors(P[j], P[i]).cross(tmp2.subVectors(P[k], P[i]));
