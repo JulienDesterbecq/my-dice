@@ -336,6 +336,8 @@ const STYLES = {
   pierre: { name: 'Pierre', pattern: 'stone', bump: 3, roughness: 0.9, tint: ['#9a958c', 0.45] },
   metal:  { name: 'Métal',  pattern: 'metal', roughness: 0.38, metalness: 0.9, envIntensity: 3, tint: ['#c8ccd2', 0.35] },
   resine: { name: 'Résine', roughness: 0.3, clearcoat: 0.6 },
+  verre:  { name: 'Verre', glass: true, roughness: 0.03, transmission: 0.9, thickness: 0.8, attDist: 1.2, whiten: 0.4 },
+  paillettes: { name: 'Paillettes', glass: true, roughness: 0.2, transmission: 0.78, thickness: 0.8, attDist: 1.0, whiten: 0.3, sparkle: true },
 };
 let styleKey = 'marbre';
 try { const v = localStorage.getItem('dice-style'); if (STYLES[v]) styleKey = v; } catch (_) {}
@@ -381,6 +383,9 @@ function patternTexture(kind) {
     } else if (kind === 'stone') {
       const t = fbm(u * 8, v * 8, 6, 5), sp = hash2(x, y, 11);
       val = 0.35 + 0.6 * t + 0.18 * (vnoise(u * 90, v * 90, 13) - 0.5) + (sp > 0.985 ? 0.3 : sp < 0.02 ? -0.35 : 0);
+    } else if (kind === 'sparkle') {
+      const hsp = hash2(x, y, 31);
+      val = hsp > 0.993 ? 0.6 + (hsp - 0.993) * 57 : 0;            // points brillants épars
     } else {
       val = 0.8 + 0.3 * (fbm(u * 3, v * 180, 3, 21) - 0.5) + 0.08 * (fbm(u * 8, v * 8, 3, 4) - 0.5);
     }
@@ -403,6 +408,20 @@ function bodyColor(type) {
 
 function dieMaterial(type) {
   const st = STYLES[styleKey];
+  if (st.glass) {
+    // Verre / résine translucide : la lumière traverse le dé et se teinte avec l'épaisseur
+    const base = new THREE.Color(TYPES[type].color), white = new THREE.Color('#ffffff');
+    return new THREE.MeshPhysicalMaterial({
+      color: base.clone().lerp(white, st.whiten),
+      transmission: st.transmission, thickness: st.thickness, ior: 1.5,
+      attenuationColor: base, attenuationDistance: st.attDist,
+      roughness: st.roughness, metalness: 0,
+      clearcoat: 1, clearcoatRoughness: 0.04, specularIntensity: 1,
+      emissive: st.sparkle ? base.clone().lerp(white, 0.7) : new THREE.Color('#000000'),
+      emissiveMap: st.sparkle ? patternTexture('sparkle') : null,
+      emissiveIntensity: st.sparkle ? 1.4 : 0,
+    });
+  }
   const color = bodyColor(type);
   const tex = st.pattern ? patternTexture(st.pattern) : null;
   return new THREE.MeshPhysicalMaterial({
@@ -424,23 +443,74 @@ function templateFor(type) {
   const labels = type === 'd4' ? null : faceLabels(type, faces);
 
   // Géométrie de rendu (facettes planes)
-  const pos = [], nor = [], uv = [];
+  // --- Géométrie arrondie : faces rentrées + bandes d'arête + coins ---
+  // Les normales passent en douceur d'une face à l'autre sur les bandes : l'arête paraît arrondie
+  // et accroche la lumière. La physique garde le polyèdre exact.
+  const B = 0.06 * TYPES[type].radius;
   const frac = x => x - Math.floor(x);
-  faces.forEach((f, fi) => {
+  const faceUV = faces.map((f, fi) => {
     // chaque face « découpe » un morceau différent de la matière
     const u = verts[f.ids[0]].clone().sub(f.center).normalize();
-    const w = new THREE.Vector3().crossVectors(f.normal, u);
-    const ou = 0.3 + 0.4 * frac(Math.sin(fi * 12.9898 + 1) * 43758.5453);
-    const ow = 0.3 + 0.4 * frac(Math.sin(fi * 78.233 + 2) * 43758.5453);
-    for (let i = 1; i < f.ids.length - 1; i++) {
-      for (const id of [f.ids[0], f.ids[i], f.ids[i + 1]]) {
-        const p = verts[id];
-        pos.push(...p.toArray()); nor.push(...f.normal.toArray());
-        const d = p.clone().sub(f.center);
-        uv.push(ou + d.dot(u) * 0.22, ow + d.dot(w) * 0.22);
-      }
-    }
+    return {
+      u, w: new THREE.Vector3().crossVectors(f.normal, u),
+      ou: 0.3 + 0.4 * frac(Math.sin(fi * 12.9898 + 1) * 43758.5453),
+      ow: 0.3 + 0.4 * frac(Math.sin(fi * 78.233 + 2) * 43758.5453),
+    };
   });
+  const uvOf = (fi, p) => {
+    const F = faceUV[fi], d = p.clone().sub(faces[fi].center);
+    return [F.ou + d.dot(F.u) * 0.22, F.ow + d.dot(F.w) * 0.22];
+  };
+  // coin de chaque face, rentré de B vers l'intérieur de la face
+  const inset = faces.map(f => {
+    const m = new Map(), n = f.ids.length;
+    f.ids.forEach((id, k) => {
+      const v = verts[id];
+      const e1 = verts[f.ids[(k + n - 1) % n]].clone().sub(v).normalize();
+      const e2 = verts[f.ids[(k + 1) % n]].clone().sub(v).normalize();
+      const bis = e1.clone().add(e2).normalize();
+      m.set(id, v.clone().addScaledVector(bis, B / Math.sin(e1.angleTo(e2) / 2)));
+    });
+    return m;
+  });
+
+  const pos = [], nor = [], uv = [];
+  const tri = (A, Bv, C) => {           // sommets = [position, normale, uv]
+    const cr = Bv[0].clone().sub(A[0]).cross(C[0].clone().sub(A[0]));
+    if (cr.dot(A[0].clone().add(Bv[0]).add(C[0])) < 0) [Bv, C] = [C, Bv];   // toujours vers l'extérieur
+    for (const [p, n, t] of [A, Bv, C]) { pos.push(p.x, p.y, p.z); nor.push(n.x, n.y, n.z); uv.push(t[0], t[1]); }
+  };
+  const V = (fi, id) => { const p = inset[fi].get(id); return [p, faces[fi].normal, uvOf(fi, p)]; };
+
+  // faces
+  faces.forEach((f, fi) => {
+    for (let i = 1; i < f.ids.length - 1; i++) tri(V(fi, f.ids[0]), V(fi, f.ids[i]), V(fi, f.ids[i + 1]));
+  });
+  // bandes d'arête
+  const edges = new Map();
+  faces.forEach((f, fi) => f.ids.forEach((a, k) => {
+    const b = f.ids[(k + 1) % f.ids.length], key = Math.min(a, b) + '_' + Math.max(a, b);
+    if (!edges.has(key)) edges.set(key, { a, b, fs: [] });
+    edges.get(key).fs.push(fi);
+  }));
+  for (const { a, b, fs: [F, G] } of edges.values()) {
+    tri(V(F, a), V(F, b), V(G, b));
+    tri(V(F, a), V(G, b), V(G, a));
+  }
+  // coins : petit éventail bombé
+  verts.forEach((v, id) => {
+    const inc = faces.map((_, fi) => fi).filter(fi => faces[fi].ids.includes(id));
+    const nV = v.clone().normalize();
+    const ref = inset[inc[0]].get(id).clone().sub(v), w2 = nV.clone().cross(ref);
+    const ang = fi => { const d = inset[fi].get(id).clone().sub(v); return Math.atan2(d.dot(w2), d.dot(ref)); };
+    inc.sort((i, j) => ang(i) - ang(j));
+    const c = new THREE.Vector3();
+    inc.forEach(fi => c.add(inset[fi].get(id)));
+    c.divideScalar(inc.length).addScaledVector(nV, B * 0.35);
+    const C = [c, nV, uvOf(inc[0], c)];
+    for (let k = 0; k < inc.length; k++) tri(C, V(inc[k], id), V(inc[(k + 1) % inc.length], id));
+  });
+
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
   geo.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
@@ -798,7 +868,7 @@ function saveColors() {
   try { localStorage.setItem('dice-colors', JSON.stringify(out)); } catch (_) {}
 }
 function refreshBody(type) {
-  for (const d of dice) if (d.type === type) d.mesh.material.color.copy(bodyColor(type));
+  for (const d of dice) if (d.type === type) { d.mesh.material.dispose(); d.mesh.material = dieMaterial(type); }
 }
 function refreshInk(type) {
   for (const d of dice) if (d.type === type) {
