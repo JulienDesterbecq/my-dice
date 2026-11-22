@@ -420,12 +420,11 @@ function boxBlur(src, S, r) {
 // + une carte « données » linéaire : R = relief (bumpMap), G = rugosité, B = métal
 // (+ une normalMap pour les paillettes). Rugosité/métal absolus dans la carte : le
 // matériau du corps utilise roughness = metalness = 1 ; `roughness` ci-dessous sert aux chiffres.
-// labelMap : le fond des chiffres montre la matière (gravure à nu, métal) au lieu d'une peinture unie.
 const STYLES = {
   marbre: { name: 'Marbre', pattern: 'marble', roughness: 0.18, clearcoat: 1, ccRough: 0.03 },
   bois:   { name: 'Bois',   pattern: 'wood',  bump: 0.5, roughness: 0.55, clearcoat: 0.35, ccRough: 0.32, tint: ['#a8743f', 0.55] },
   pierre: { name: 'Pierre', pattern: 'stone', bump: 0.5, roughness: 0.5, clearcoat: 0.15, ccRough: 0.25, tint: ['#9a958c', 0.45] },
-  metal:  { name: 'Métal',  pattern: 'metal', bump: 0.5, roughness: 0.4, metalness: 1, envIntensity: 2.6, anisotropy: 0.55, tint: ['#c8ccd2', 0.35], labelMap: true },
+  metal:  { name: 'Métal',  pattern: 'metal', bump: 0.5, roughness: 0.4, metalness: 1, envIntensity: 2.6, anisotropy: 0.55, tint: ['#c8ccd2', 0.35] },
   resine: { name: 'Résine', pattern: 'resin', bump: 0.25, roughness: 0.3, clearcoat: 0.45, ccRough: 0.1 },
   verre:  { name: 'Verre', glass: true, roughness: 0.03, transmission: 0.9, thickness: 0.8, attDist: 1.2, whiten: 0.4 },
   paillettes: { name: 'Paillettes', glass: true, pattern: 'sparkle', roughness: 0.2, transmission: 0.8, thickness: 0.8, attDist: 1.0, whiten: 0.3, sparkle: true },
@@ -653,7 +652,7 @@ function labelMaterial(type, text) {
   const st = STYLES[styleKey], t = labelTextures(text);
   return new THREE.MeshPhysicalMaterial({
     color: TYPES[type].ink,
-    map: st.labelMap ? patternTexture1(st.pattern) : null,
+    map: st.pattern && !st.glass ? patternTexture1(st.pattern) : null,   // matière visible dans le creux (demande utilisateur)
     alphaMap: t.alpha, transparent: true,
     normalMap: t.normalMap, normalScale: new THREE.Vector2(1.5, 1.5),
     aoMap: t.ao, aoMapIntensity: 1,
