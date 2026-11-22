@@ -118,14 +118,15 @@ window.__diceLoaded = true;
    ========================================================= */
 const MAX_DICE = 12;
 const TYPES = {
-  d6:   { faces: 6,  radius: 0.85, color: '#f5f0e6', ink: '#b91c1c' },
+  d4:   { faces: 4,  radius: 1.15, color: '#eab308', ink: '#1c1917' },
+  d6:   { faces: 6,  radius: 0.85, color: '#db2777', ink: '#ffffff' },
   d8:   { faces: 8,  radius: 0.95, color: '#2563eb', ink: '#ffffff' },
   d10:  { faces: 10, radius: 0.95, color: '#7c3aed', ink: '#ffffff' },
   d12:  { faces: 12, radius: 1.00, color: '#ea580c', ink: '#ffffff' },
   d20:  { faces: 20, radius: 1.05, color: '#dc2626', ink: '#ffffff' },
   d100: { faces: 10, radius: 0.95, color: '#0d9488', ink: '#ffffff' },
 };
-const counts = { d6: 2, d8: 0, d10: 0, d12: 0, d20: 0, d100: 0 };
+const counts = { d4: 0, d6: 2, d8: 0, d10: 0, d12: 0, d20: 0, d100: 0 };
 
 /* ---------- Construction des polyèdres ---------- */
 function trianglesFromGeometry(geo) {
@@ -192,6 +193,7 @@ function buildPolyhedron(tris, radius) {
 function shapeFor(type) {
   const r = TYPES[type].radius;
   switch (type) {
+    case 'd4':  return buildPolyhedron(trianglesFromGeometry(new THREE.TetrahedronGeometry(1)), r);
     case 'd6':  return buildPolyhedron(trianglesFromGeometry(new THREE.BoxGeometry(1, 1, 1)), r);
     case 'd8':  return buildPolyhedron(trianglesFromGeometry(new THREE.OctahedronGeometry(1)), r);
     case 'd12': return buildPolyhedron(trianglesFromGeometry(new THREE.DodecahedronGeometry(1)), r);
@@ -223,29 +225,18 @@ function faceLabels(type, faces) {
 
 /* ---------- Textures des faces ---------- */
 const texCache = new Map();
-function labelTexture(text, ink, pips) {
-  const k = text + ink + pips;
+function labelTexture(text, ink) {
+  const k = text + ink;
   if (texCache.has(k)) return texCache.get(k);
   const S = 256, cv = document.createElement('canvas');
   cv.width = cv.height = S;
   const g = cv.getContext('2d');
   g.fillStyle = ink;
-  if (pips) {
-    const P = {
-      1: [[.5, .5]], 2: [[.25, .25], [.75, .75]], 3: [[.25, .25], [.5, .5], [.75, .75]],
-      4: [[.25, .25], [.75, .25], [.25, .75], [.75, .75]],
-      5: [[.25, .25], [.75, .25], [.5, .5], [.25, .75], [.75, .75]],
-      6: [[.25, .22], [.75, .22], [.25, .5], [.75, .5], [.25, .78], [.75, .78]],
-    }[text];
-    const r = text === '1' ? S * .13 : S * .095;
-    for (const [x, y] of P) { g.beginPath(); g.arc(x * S, y * S, r, 0, Math.PI * 2); g.fill(); }
-  } else {
-    const size = text.length > 1 ? 120 : 150;
-    g.font = `800 ${size}px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif`;
-    g.textAlign = 'center'; g.textBaseline = 'middle';
-    g.fillText(text, S / 2, S / 2 + size * 0.04);
-    if (text === '6' || text === '9') g.fillRect(S / 2 - 34, S / 2 + size * 0.42, 68, 12);  // repère 6/9
-  }
+  const size = text.length > 1 ? 120 : 150;
+  g.font = `800 ${size}px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif`;
+  g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.fillText(text, S / 2, S / 2 + size * 0.04);
+  if (text === '6' || text === '9') g.fillRect(S / 2 - 34, S / 2 + size * 0.42, 68, 12);  // repère 6/9
   const tex = new THREE.CanvasTexture(cv);
   tex.colorSpace = THREE.SRGBColorSpace;
   tex.anisotropy = 4;
@@ -258,7 +249,9 @@ const templates = {};
 function templateFor(type) {
   if (templates[type]) return templates[type];
   const { verts, faces } = shapeFor(type);
-  const labels = faceLabels(type, faces);
+  // d4 : la valeur est portée par chaque sommet (lu sur le sommet du haut)
+  const vertexValues = type === 'd4' ? verts.map((_, i) => ({ value: i + 1, text: String(i + 1) })) : null;
+  const labels = type === 'd4' ? null : faceLabels(type, faces);
 
   // Géométrie de rendu (facettes planes)
   const pos = [], nor = [];
@@ -274,7 +267,8 @@ function templateFor(type) {
   geo.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
 
   // Placement des étiquettes
-  const labelInfo = faces.map((f, i) => {
+  const labelInfo = [];
+  faces.forEach((f, i) => {
     // rayon inscrit approx. = distance mini du centre aux arêtes
     let inr = Infinity;
     for (let k = 0; k < f.ids.length; k++) {
@@ -289,17 +283,30 @@ function templateFor(type) {
       for (const id of f.ids) { const d = verts[id].distanceTo(f.center); if (d > best + 1e-6) { best = d; far = id; } }
       up = verts[far].clone().sub(f.center);
     }
+    if (type === 'd4') {
+      // un chiffre près de chaque coin, tourné vers ce coin
+      for (const id of f.ids) {
+        const dir = verts[id].clone().sub(f.center);
+        labelInfo.push({ ...vertexValues[id], normal: f.normal, up: dir.clone().normalize(),
+          center: f.center.clone().addScaledVector(dir, 0.52), size: 2 * inr * 0.85 });
+      }
+      return;
+    }
     up.normalize();
-    const scale = { d6: 0.92, d8: 1.5, d10: 1.45, d12: 1.4, d20: 1.35, d100: 1.6 }[type];
-    return { ...labels[i], normal: f.normal, center: f.center, up, size: 2 * inr * scale };
+    const scale = { d6: 1.3, d8: 1.5, d10: 1.45, d12: 1.4, d20: 1.35, d100: 1.6 }[type];
+    labelInfo.push({ ...labels[i], normal: f.normal, center: f.center, up, size: 2 * inr * scale });
   });
+  // Ce qui sert à lire le résultat : normale de face, ou direction du sommet pour le d4
+  const readInfo = type === 'd4'
+    ? verts.map((v, i) => ({ ...vertexValues[i], normal: v.clone().normalize() }))
+    : labelInfo;
 
   const shape = new CANNON.ConvexPolyhedron({
     vertices: verts.map(v => new CANNON.Vec3(v.x, v.y, v.z)),
     faces: faces.map(f => f.ids),
   });
 
-  return (templates[type] = { geo, labelInfo, shape });
+  return (templates[type] = { geo, labelInfo, readInfo, shape });
 }
 
 /* =========================================================
@@ -368,13 +375,12 @@ function createDie(type) {
   const mesh = new THREE.Mesh(tpl.geo, new THREE.MeshStandardMaterial({ color: conf.color, roughness: 0.35, flatShading: true }));
   mesh.castShadow = true;
 
-  const pips = type === 'd6';
   const q = new THREE.Quaternion(), m = new THREE.Matrix4();
   for (const L of tpl.labelInfo) {
     const plane = new THREE.Mesh(
       new THREE.PlaneGeometry(L.size, L.size),
       new THREE.MeshStandardMaterial({
-        map: labelTexture(L.text, conf.ink, pips), transparent: true, roughness: 0.4,
+        map: labelTexture(L.text, conf.ink), transparent: true, roughness: 0.4,
         polygonOffset: true, polygonOffsetFactor: -2, depthWrite: false,
       })
     );
@@ -393,7 +399,7 @@ function createDie(type) {
     linearDamping: 0.1, angularDamping: 0.12,
   });
   world.addBody(body);
-  const die = { type, mesh, body, labelInfo: tpl.labelInfo, value: null, text: '', rolling: false, rollStart: 0 };
+  const die = { type, mesh, body, labelInfo: tpl.readInfo, value: null, text: '', rolling: false, rollStart: 0 };
   mesh.userData.die = die;
   body.addEventListener('collide', e => {
     const v = Math.abs(e.contact.getImpactVelocityAlongNormal());
@@ -467,8 +473,7 @@ function updateResult() {
   const total = dice.reduce((s, d) => s + d.value, 0);
   const chips = dice.map(d => {
     const c = TYPES[d.type];
-    const light = d.type === 'd6';
-    return `<span class="v" style="background:${c.color};color:${light ? '#111' : '#fff'}">${d.text}<small> ${d.type}</small></span>`;
+    return `<span class="v" style="background:${c.color};color:${c.ink}">${d.text}<small> ${d.type}</small></span>`;
   }).join(' ');
   let extra = '';
   // d100 + d10 = jet de pourcentage (00 + 10 → 100)
