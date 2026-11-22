@@ -82,6 +82,9 @@
   .sheet p { margin: 0 0 12px; color: var(--muted); font-size: 13px; }
   .crow { display: grid; grid-template-columns: 52px 1fr 1fr; align-items: center; gap: 10px; padding: 6px 0; border-top: 1px solid rgba(255,255,255,.08); }
   .crow b { font-size: 15px; }
+  .toggle { display: flex; align-items: center; gap: 10px; padding: 8px 0 12px; font-size: 14px; cursor: pointer; }
+  .toggle input { width: 20px; height: 20px; accent-color: var(--accent); }
+  #colorRows.off { opacity: .4; pointer-events: none; }
   .crow.all { border-top: 0; padding-bottom: 10px; margin-bottom: 4px; border-bottom: 1px solid rgba(255,255,255,.25); }
   .crow label { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
   .crow input[type=color] {
@@ -129,6 +132,7 @@
 <div class="sheet" id="colorSheet" hidden>
   <h2>Couleurs des dés</h2>
   <p>Corps et chiffres : pour tous les dés d’un coup, ou type par type.</p>
+  <label class="toggle"><input type="checkbox" id="randomColors"> Couleurs aléatoires, nouveau tirage à chaque lancer</label>
   <div id="colorRows"></div>
   <div class="actions">
     <button id="colorReset">Couleurs d’origine</button>
@@ -695,9 +699,12 @@ function patternMaps(kind) {
 }
 function patternTexture(kind) { return patternMaps(kind).map; }
 
-function bodyColor(type) {
+// Couleurs d'un dé : les siennes en mode aléatoire, sinon celles de son type
+const colOf = (type, d) => (d && d.rand) || TYPES[type];
+
+function bodyColor(type, d) {
   const st = STYLES[styleKey];
-  const color = new THREE.Color(TYPES[type].color);
+  const color = new THREE.Color(colOf(type, d).color);
   if (st.tint) color.lerp(new THREE.Color(st.tint[0]), st.tint[1]);
   return color;
 }
@@ -750,12 +757,12 @@ function photoMaps(name, repeat) {
   return (photoCache[name] = out);
 }
 
-function labelMaterial(type, text) {
+function labelMaterial(type, text, d) {
   const st = STYLES[styleKey], t = labelTextures(text);
   return new THREE.MeshPhysicalMaterial({
-    color: TYPES[type].ink,
+    color: colOf(type, d).ink,
     map: st.photo ? (photoLabelCache[st.photo] || null)
-      : st.pattern && !st.glass ? patternTexture1(st.pattern) : null,   // matière visible dans le creux   // matière visible dans le creux (demande utilisateur)
+      : st.pattern && !st.glass ? patternTexture1(st.pattern) : null,   // matière visible dans le creux
     alphaMap: t.alpha, transparent: true,
     normalMap: t.normalMap, normalScale: new THREE.Vector2(1.5, 1.5),
     aoMap: t.ao, aoMapIntensity: 1,
@@ -766,14 +773,14 @@ function labelMaterial(type, text) {
   });
 }
 function refreshLabels(d) {
-  for (const plane of d.mesh.children) { plane.material.dispose(); plane.material = labelMaterial(d.type, plane.userData.text); }
+  for (const plane of d.mesh.children) { plane.material.dispose(); plane.material = labelMaterial(d.type, plane.userData.text, d); }
 }
 
-function dieMaterial(type) {
+function dieMaterial(type, d) {
   const st = STYLES[styleKey];
   if (st.photo) {
     const P = photoMaps(st.photo, st.repeat);
-    const color = new THREE.Color('#ffffff').lerp(new THREE.Color(TYPES[type].color), st.stain);
+    const color = new THREE.Color('#ffffff').lerp(new THREE.Color(colOf(type, d).color), st.stain);
     return new THREE.MeshPhysicalMaterial({
       color, map: P.map,
       normalMap: P.normalMap, normalScale: new THREE.Vector2(st.normal, st.normal),
@@ -784,7 +791,7 @@ function dieMaterial(type) {
   }
   if (st.glass) {
     // Verre / résine translucide : la lumière traverse le dé et se teinte avec l'épaisseur
-    const base = new THREE.Color(TYPES[type].color), white = new THREE.Color('#ffffff');
+    const base = new THREE.Color(colOf(type, d).color), white = new THREE.Color('#ffffff');
     const m = new THREE.MeshPhysicalMaterial({
       color: base.clone().lerp(white, st.whiten),
       transmission: st.transmission, thickness: st.thickness, ior: 1.5,
@@ -804,7 +811,7 @@ function dieMaterial(type) {
     }
     return m;
   }
-  const color = bodyColor(type);
+  const color = bodyColor(type, d);
   const P = st.pattern ? patternMaps(st.pattern) : null;
   return new THREE.MeshPhysicalMaterial({
     color, map: P ? P.map : null,
@@ -1385,9 +1392,34 @@ function rollDie(d, strength = 1, slot) {
   startRolling(d);
 }
 
+/* ---------- Couleurs aléatoires (nouveau tirage à chaque lancer) ---------- */
+let randomColors = false;
+try { randomColors = localStorage.getItem('dice-random-colors') === '1'; } catch (_) {}
+const hsl = (h, s, l) => '#' + new THREE.Color().setHSL(h, s, l, THREE.SRGBColorSpace).getHexString(THREE.SRGBColorSpace);
+function randomPair() {
+  const h = Math.random(), s = 0.5 + Math.random() * 0.4, l = 0.22 + Math.random() * 0.45;
+  // chiffres : contraste assuré (clair sur foncé, foncé sur clair), parfois doré ou argenté
+  const color = hsl(h, s, l), c = new THREE.Color(color);   // composantes linéaires
+  const lum = 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;  // luminosité perçue (un bleu pur est sombre)
+  const r = Math.random();
+  const ink = lum < 0.2
+    ? (r < 0.2 ? '#fbbf24' : r < 0.35 ? '#d1d5db' : '#ffffff')
+    : (r < 0.25 ? hsl((h + 0.5) % 1, 0.7, 0.16) : '#111827');
+  return { color, ink };
+}
+function paintDie(d) {
+  d.mesh.material.dispose(); d.mesh.material = dieMaterial(d.type, d);
+  for (const plane of d.mesh.children) plane.material.color.set(colOf(d.type, d).ink);
+}
+function recolorDie(d) {
+  d.rand = randomColors ? randomPair() : null;
+  paintDie(d);
+}
+
 function rollAll(strength = 1, opts = {}) {
   if (!dice.length) return;
   hideHint();
+  if (randomColors) dice.forEach(recolorDie);
   const slots = makeThrow(dice, strength, opts);
   dice.forEach((d, i) => { d.throwStart = simTime; rollDie(d, strength, slots[i]); });
   if (navigator.vibrate && navigator.userActivation?.hasBeenActive) navigator.vibrate(30);
@@ -1423,7 +1455,7 @@ function updateResult() {
 
   const total = dice.reduce((s, d) => s + d.value, 0);
   const chips = dice.map(d => {
-    const c = TYPES[d.type];
+    const c = colOf(d.type, d);
     return `<span class="v" style="background:${c.color};color:${c.ink}">${d.text}<small> ${d.type}</small></span>`;
   }).join(' ');
   let extra = '';
@@ -1534,6 +1566,7 @@ canvas.addEventListener('pointerdown', e => {
     let o = hit.object;
     while (o && !o.userData.die) o = o.parent;
     hideHint();
+    if (randomColors) recolorDie(o.userData.die);
     rollDie(o.userData.die);
     if (navigator.vibrate) navigator.vibrate(20);
     updateResult();
@@ -1553,11 +1586,11 @@ function saveColors() {
   try { localStorage.setItem('dice-colors', JSON.stringify(out)); } catch (_) {}
 }
 function refreshBody(type) {
-  for (const d of dice) if (d.type === type) { d.mesh.material.dispose(); d.mesh.material = dieMaterial(type); }
+  for (const d of dice) if (d.type === type) { d.mesh.material.dispose(); d.mesh.material = dieMaterial(type, d); }
 }
 function refreshInk(type) {
   for (const d of dice) if (d.type === type) {
-    for (const plane of d.mesh.children) plane.material.color.set(TYPES[type].ink);
+    for (const plane of d.mesh.children) plane.material.color.set(colOf(type, d).ink);
   }
 }
 function buildColorRows() {
@@ -1603,7 +1636,20 @@ function buildColorRows() {
     colorRows.appendChild(row);
   }
 }
-document.getElementById('colorBtn').addEventListener('click', () => { buildColorRows(); colorSheet.hidden = false; });
+const randomBox = document.getElementById('randomColors');
+document.getElementById('colorBtn').addEventListener('click', () => {
+  buildColorRows();
+  randomBox.checked = randomColors;
+  colorRows.classList.toggle('off', randomColors);
+  colorSheet.hidden = false;
+});
+randomBox.addEventListener('change', () => {
+  randomColors = randomBox.checked;
+  try { localStorage.setItem('dice-random-colors', randomColors ? '1' : '0'); } catch (_) {}
+  colorRows.classList.toggle('off', randomColors);
+  dice.forEach(recolorDie);   // tirage immédiat (ou retour aux couleurs normales)
+  updateResult();
+});
 document.getElementById('colorClose').addEventListener('click', () => { colorSheet.hidden = true; });
 document.getElementById('colorReset').addEventListener('click', () => {
   for (const k in TYPES) {
@@ -1618,7 +1664,7 @@ document.getElementById('colorReset').addEventListener('click', () => {
 const styleBtn = document.getElementById('styleBtn');
 function applyStyle() {
   styleBtn.textContent = 'Matière : ' + STYLES[styleKey].name;
-  for (const d of dice) { d.mesh.material.dispose(); d.mesh.material = dieMaterial(d.type); refreshLabels(d); }
+  for (const d of dice) { d.mesh.material.dispose(); d.mesh.material = dieMaterial(d.type, d); refreshLabels(d); }
   try { localStorage.setItem('dice-style', styleKey); } catch (_) {}
 }
 styleBtn.addEventListener('click', () => {
