@@ -262,57 +262,55 @@ function faceLabels(type, faces) {
 }
 
 /* ---------- Chiffres gravés ---------- */
-// Couleur (peinture dans le creux + ombre intérieure) et carte de normales (relief du creux)
+// Masque (forme du chiffre), carte de normales (parois du creux, éclairées par la vraie lumière)
+// et occlusion (le fond du creux reçoit moins de lumière ambiante près des parois).
+// La couleur vient du matériau : couleur des chiffres × texture de la matière.
 const texCache = new Map();
-function labelTextures(text, ink) {
-  const k = text + ink;
-  if (texCache.has(k)) return texCache.get(k);
+function labelTextures(text) {
+  if (texCache.has(text)) return texCache.get(text);
   const S = 256;
-  const canvas2d = () => { const c = document.createElement('canvas'); c.width = c.height = S; return c; };
-
-  const mask = canvas2d(), mg = mask.getContext('2d');
+  const mask = document.createElement('canvas'); mask.width = mask.height = S;
+  const mg = mask.getContext('2d');
   const size = text.length > 1 ? 120 : 150;
+  mg.fillStyle = '#000'; mg.fillRect(0, 0, S, S);
   mg.fillStyle = '#fff';
   mg.font = `800 ${size}px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif`;
   mg.textAlign = 'center'; mg.textBaseline = 'middle';
   mg.fillText(text, S / 2, S / 2 + size * 0.04);
   if (text === '6' || text === '9') mg.fillRect(S / 2 - 34, S / 2 + size * 0.42, 68, 12);  // repère 6/9
 
-  // Couleur : chiffre peint, ombre portée par le bord haut du creux, reflet sur le bord bas
-  const col = canvas2d(), g = col.getContext('2d');
-  g.drawImage(mask, 0, 0);
-  g.globalCompositeOperation = 'source-in';
-  g.fillStyle = ink; g.fillRect(0, 0, S, S);
-  const outside = canvas2d(), og = outside.getContext('2d');
-  og.fillStyle = '#000'; og.fillRect(0, 0, S, S);
-  og.globalCompositeOperation = 'destination-out';
-  og.drawImage(mask, 0, 0);
-  g.globalCompositeOperation = 'source-atop';
-  g.shadowColor = 'rgba(0,0,0,0.75)'; g.shadowBlur = 7; g.shadowOffsetX = 3; g.shadowOffsetY = 7;
-  g.drawImage(outside, 0, 0);
-  g.shadowColor = 'rgba(255,255,255,0.35)'; g.shadowBlur = 3; g.shadowOffsetX = -2; g.shadowOffsetY = -4;
-  g.drawImage(outside, 0, 0);
+  const px = mg.getImageData(0, 0, S, S).data;
+  const m = new Float32Array(S * S);
+  for (let i = 0; i < S * S; i++) m[i] = px[i * 4] / 255;
 
-  // Normales : hauteur = masque flouté inversé (le chiffre est en creux)
-  const a = mg.getImageData(0, 0, S, S).data;
-  let h = new Float32Array(S * S);
-  for (let i = 0; i < S * S; i++) h[i] = 1 - a[i * 4 + 3] / 255;
-  for (let pass = 0; pass < 2; pass++) h = boxBlur(h, S, 3);
-  const nc = canvas2d(), ng = nc.getContext('2d'), img = ng.createImageData(S, S);
+  // relief : hauteur = 1 dehors, 0 au fond du creux, parois en pente douce
+  let h = m.map(v => 1 - v);
+  for (let pass = 0; pass < 2; pass++) h = boxBlur(h, S, 2);
+  // occlusion : plus sombre près des parois
+  let o = m.slice();
+  for (let pass = 0; pass < 2; pass++) o = boxBlur(o, S, 5);
+
+  const toCanvas = fill => {
+    const c = document.createElement('canvas'); c.width = c.height = S;
+    const g = c.getContext('2d'), img = g.createImageData(S, S);
+    for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) fill(img.data, (y * S + x) * 4, x, y);
+    g.putImageData(img, 0, 0);
+    return new THREE.CanvasTexture(c);
+  };
   const at = (x, y) => h[Math.min(S - 1, Math.max(0, y)) * S + Math.min(S - 1, Math.max(0, x))];
-  for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
-    let nx = -(at(x + 1, y) - at(x - 1, y)) * 6, ny = (at(x, y + 1) - at(x, y - 1)) * 6, nz = 1;
-    const l = Math.hypot(nx, ny, nz); nx /= l; ny /= l; nz /= l;
-    const o = (y * S + x) * 4;
-    img.data[o] = (nx * .5 + .5) * 255; img.data[o + 1] = (ny * .5 + .5) * 255; img.data[o + 2] = (nz * .5 + .5) * 255; img.data[o + 3] = 255;
-  }
-  ng.putImageData(img, 0, 0);
-
-  const map = new THREE.CanvasTexture(col);
-  map.colorSpace = THREE.SRGBColorSpace; map.anisotropy = 4;
-  const normalMap = new THREE.CanvasTexture(nc);
-  const out = { map, normalMap };
-  texCache.set(k, out);
+  const normalMap = toCanvas((d, i, x, y) => {
+    let nx = -(at(x + 1, y) - at(x - 1, y)) * 9, ny = (at(x, y + 1) - at(x, y - 1)) * 9, nz = 1;
+    const l = Math.hypot(nx, ny, nz);
+    d[i] = (nx / l * .5 + .5) * 255; d[i + 1] = (ny / l * .5 + .5) * 255; d[i + 2] = (nz / l * .5 + .5) * 255; d[i + 3] = 255;
+  });
+  const ao = toCanvas((d, i, x, y) => {
+    const v = 255 * Math.min(1, 0.3 + 0.75 * o[y * S + x]);
+    d[i] = d[i + 1] = d[i + 2] = v; d[i + 3] = 255;
+  });
+  const alpha = new THREE.CanvasTexture(mask);
+  for (const t of [normalMap, ao, alpha]) t.anisotropy = 4;
+  const out = { alpha, normalMap, ao };
+  texCache.set(text, out);
   return out;
 }
 
@@ -404,6 +402,30 @@ function bodyColor(type) {
   const color = new THREE.Color(TYPES[type].color);
   if (st.tint) color.lerp(new THREE.Color(st.tint[0]), st.tint[1]);
   return color;
+}
+
+// Texture de matière lue via uv1 (coordonnées de la face) pour les chiffres
+const patternUV1 = {};
+function patternTexture1(kind) {
+  if (!patternUV1[kind]) { const t = patternTexture(kind).clone(); t.channel = 1; t.needsUpdate = true; patternUV1[kind] = t; }
+  return patternUV1[kind];
+}
+
+function labelMaterial(type, text) {
+  const st = STYLES[styleKey], t = labelTextures(text);
+  return new THREE.MeshPhysicalMaterial({
+    color: TYPES[type].ink,
+    map: st.pattern && !st.glass ? patternTexture1(st.pattern) : null,
+    alphaMap: t.alpha, transparent: true,
+    normalMap: t.normalMap, normalScale: new THREE.Vector2(1.5, 1.5),
+    aoMap: t.ao, aoMapIntensity: 1,
+    roughness: Math.min(1, (st.roughness ?? 0.4) + 0.15), metalness: st.metalness || 0,
+    envMapIntensity: st.envIntensity || 1,
+    polygonOffset: true, polygonOffsetFactor: -2, depthWrite: false,
+  });
+}
+function refreshLabels(d) {
+  for (const plane of d.mesh.children) { plane.material.dispose(); plane.material = labelMaterial(d.type, plane.userData.text); }
 }
 
 function dieMaterial(type) {
@@ -537,15 +559,27 @@ function templateFor(type) {
       // un chiffre près de chaque coin, tourné vers ce coin
       for (const id of f.ids) {
         const dir = verts[id].clone().sub(f.center);
-        labelInfo.push({ ...vertexValues[id], normal: f.normal, up: dir.clone().normalize(),
+        labelInfo.push({ ...vertexValues[id], fi: i, normal: f.normal, up: dir.clone().normalize(),
           center: f.center.clone().addScaledVector(dir, 0.52), size: 2 * inr * 0.85 });
       }
       return;
     }
     up.normalize();
     const scale = { d6: 1.3, d8: 1.5, d10: 1.45, d12: 1.4, d20: 1.35, d100: 1.6 }[type];
-    labelInfo.push({ ...labels[i], normal: f.normal, center: f.center, up, size: 2 * inr * scale });
+    labelInfo.push({ ...labels[i], fi: i, normal: f.normal, center: f.center, up, size: 2 * inr * scale });
   });
+  // Plan de chaque chiffre : uv = forme du chiffre, uv1 = même matière que la face en dessous
+  for (const L of labelInfo) {
+    const g = new THREE.PlaneGeometry(L.size, L.size);
+    const X = new THREE.Vector3().crossVectors(L.up, L.normal);
+    const pa = g.attributes.position, uv1 = [];
+    for (let k = 0; k < pa.count; k++) {
+      const p = L.center.clone().addScaledVector(X, pa.getX(k)).addScaledVector(L.up, pa.getY(k));
+      uv1.push(...uvOf(L.fi, p));
+    }
+    g.setAttribute('uv1', new THREE.Float32BufferAttribute(uv1, 2));
+    L.geo = g;
+  }
   // Ce qui sert à lire le résultat : normale de face, ou direction du sommet pour le d4
   const readInfo = type === 'd4'
     ? verts.map((v, i) => ({ ...vertexValues[i], normal: v.clone().normalize() }))
@@ -641,17 +675,7 @@ function createDie(type) {
 
   const q = new THREE.Quaternion(), m = new THREE.Matrix4();
   for (const L of tpl.labelInfo) {
-    const plane = new THREE.Mesh(
-      new THREE.PlaneGeometry(L.size, L.size),
-      (() => {
-        const t = labelTextures(L.text, conf.ink);
-        return new THREE.MeshStandardMaterial({
-          map: t.map, normalMap: t.normalMap, normalScale: new THREE.Vector2(1.4, 1.4),
-          transparent: true, roughness: 0.6,
-          polygonOffset: true, polygonOffsetFactor: -2, depthWrite: false,
-        });
-      })()
-    );
+    const plane = new THREE.Mesh(L.geo, labelMaterial(type, L.text));
     const x = new THREE.Vector3().crossVectors(L.up, L.normal);
     m.makeBasis(x, L.up, L.normal);
     q.setFromRotationMatrix(m);
@@ -679,7 +703,7 @@ function createDie(type) {
 
 function removeDie(d) {
   scene.remove(d.mesh);
-  d.mesh.children.forEach(c => { c.geometry.dispose(); c.material.dispose(); });
+  d.mesh.children.forEach(c => c.material.dispose());   // géométries partagées par type
   d.mesh.material.dispose();
   world.removeBody(d.body);
   dice.splice(dice.indexOf(d), 1);
@@ -872,10 +896,7 @@ function refreshBody(type) {
 }
 function refreshInk(type) {
   for (const d of dice) if (d.type === type) {
-    for (const plane of d.mesh.children) {
-      const t = labelTextures(plane.userData.text, TYPES[type].ink);
-      plane.material.map = t.map; plane.material.normalMap = t.normalMap; plane.material.needsUpdate = true;
-    }
+    for (const plane of d.mesh.children) plane.material.color.set(TYPES[type].ink);
   }
 }
 function buildColorRows() {
@@ -915,7 +936,7 @@ document.getElementById('colorReset').addEventListener('click', () => {
 const styleBtn = document.getElementById('styleBtn');
 function applyStyle() {
   styleBtn.textContent = 'Matière : ' + STYLES[styleKey].name;
-  for (const d of dice) { d.mesh.material.dispose(); d.mesh.material = dieMaterial(d.type); }
+  for (const d of dice) { d.mesh.material.dispose(); d.mesh.material = dieMaterial(d.type); refreshLabels(d); }
   try { localStorage.setItem('dice-style', styleKey); } catch (_) {}
 }
 styleBtn.addEventListener('click', () => {
