@@ -166,7 +166,7 @@ const TYPES = {
   d10:  { faces: 10, radius: 0.77, fillet: 0.065, seg: 4, color: '#7c3aed', ink: '#ffffff' },
   d12:  { faces: 12, radius: 0.90, fillet: 0.06,  seg: 4, color: '#ea580c', ink: '#ffffff' },
   d20:  { faces: 20, radius: 0.94, fillet: 0.045, seg: 3, color: '#dc2626', ink: '#ffffff' },
-  d100: { faces: 10, radius: 0.77, fillet: 0.065, seg: 4, color: '#0d9488', ink: '#ffffff' },
+  d100: { faces: 100, radius: 1.2, fillet: 0.025, seg: 2, color: '#0d9488', ink: '#ffffff' },   // « Zocchihedron »
 };
 const DEFAULT_COLORS = Object.fromEntries(Object.entries(TYPES).map(([k, t]) => [k, { color: t.color, ink: t.ink }]));
 try {
@@ -251,8 +251,48 @@ function shapeFor(type) {
     case 'd8':  return buildPolyhedron(trianglesFromGeometry(new THREE.OctahedronGeometry(1)), r);
     case 'd12': return buildPolyhedron(trianglesFromGeometry(new THREE.DodecahedronGeometry(1)), r);
     case 'd20': return buildPolyhedron(trianglesFromGeometry(new THREE.IcosahedronGeometry(1)), r);
-    default:    return buildPolyhedron(d10Triangles(), r);     // d10 & d100
+    case 'd100': return buildPolyhedron(zocchiTriangles(), r);
+    default:    return buildPolyhedron(d10Triangles(), r);     // d10
   }
+}
+
+// Vrai d100 (type Zocchihedron) : 100 facettes planes tangentes à une sphère.
+// 50 directions réparties en spirale de Fibonacci sur un hémisphère + leurs opposées
+// (faces opposées appariées), enveloppe convexe des points, puis polyèdre dual :
+// chaque point devient une face, chaque triangle de l'enveloppe un sommet.
+function zocchiTriangles() {
+  const P = [], N = 50, ga = Math.PI * (3 - Math.sqrt(5));
+  for (let i = 0; i < N; i++) {
+    const y = 1 - (i + 0.5) / N, r = Math.sqrt(1 - y * y), t = i * ga;
+    const p = new THREE.Vector3(r * Math.cos(t), y, r * Math.sin(t));
+    P.push(p, p.clone().negate());
+  }
+  const n = P.length, hull = [], tmp = new THREE.Vector3(), tmp2 = new THREE.Vector3();
+  for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) for (let k = j + 1; k < n; k++) {
+    const nrm = tmp.subVectors(P[j], P[i]).cross(tmp2.subVectors(P[k], P[i]));
+    let d = nrm.dot(P[i]), sign = 0, ok = true;
+    for (let m = 0; m < n && ok; m++) {
+      if (m === i || m === j || m === k) continue;
+      const sd = nrm.dot(P[m]) - d;
+      if (Math.abs(sd) < 1e-9) continue;
+      const sg = sd > 0 ? 1 : -1;
+      if (!sign) sign = sg; else if (sg !== sign) ok = false;
+    }
+    if (ok) hull.push([i, j, k]);
+  }
+  // sommet dual : intersection des plans tangents en i, j, k (p · x = 1)
+  const M = new THREE.Matrix3(), dual = hull.map(([i, j, k]) => {
+    M.set(P[i].x, P[i].y, P[i].z, P[j].x, P[j].y, P[j].z, P[k].x, P[k].y, P[k].z).invert();
+    return new THREE.Vector3(1, 1, 1).applyMatrix3(M);
+  });
+  const tris = [];
+  P.forEach((p, pi) => {
+    const ring = hull.map((t, ti) => t.includes(pi) ? dual[ti] : null).filter(Boolean);
+    const u = ring[0].clone().sub(p).normalize(), w = p.clone().cross(u);
+    ring.sort((a, b) => Math.atan2(a.clone().sub(p).dot(w), a.clone().sub(p).dot(u)) - Math.atan2(b.clone().sub(p).dot(w), b.clone().sub(p).dot(u)));
+    for (let k = 1; k < ring.length - 1; k++) tris.push([ring[0], ring[k], ring[k + 1]]);
+  });
+  return tris;
 }
 
 // Valeurs : faces opposées appariées (somme constante : d6 = 7, d8 = 9, d10 = 9, d12 = 13, d20 = 21)
@@ -261,15 +301,22 @@ function shapeFor(type) {
 // d8/d12/d20 : sommes aux sommets équilibrées comme sur les dés de casino/JdR ; d20 : 20 entouré de 2, 8, 14.
 // Recherche locale à graine fixe : la disposition est toujours la même.
 function faceLabels(type, faces) {
-  const n = faces.length, ten = type === 'd10' || type === 'd100';
+  const n = faces.length, ten = type === 'd10';
   const K = ten ? 9 : n + 1;                       // somme de deux faces opposées
   const label = type === 'd10' ? k => ({ value: k || 10, text: String(k) })
-    : type === 'd100' ? k => ({ value: k * 10, text: k ? String(k * 10) : '00' })
     : k => ({ value: k, text: String(k) });
   const opp = faces.map(f => faces.findIndex(g => g.normal.dot(f.normal) < -0.99));
   let num = new Array(n);
 
-  if (type === 'd6') {
+  if (type === 'd100') {
+    // 1 à 100 répartis au hasard (graine fixe), faces opposées = 101 comme sur le vrai dé
+    let seed = 4242;
+    const rnd = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
+    const pairs = [];
+    faces.forEach((_, i) => { if (i < opp[i]) pairs.push([i, opp[i]]); });
+    const vals = pairs.map((_, k) => k + 1).sort(() => rnd() - 0.5);
+    pairs.forEach(([i, j], k) => { const a = rnd() < 0.5; num[i] = a ? vals[k] : 101 - vals[k]; num[j] = 101 - num[i]; });
+  } else if (type === 'd6') {
     const v = faces[0].ids[0];
     const around = faces.map((_, i) => i).filter(i => faces[i].ids.includes(v));
     const out = around.reduce((s, i) => s.add(faces[i].normal), new THREE.Vector3()).normalize();
@@ -433,8 +480,10 @@ function boxBlur(src, S, r) {
 // matériau du corps utilise roughness = metalness = 1 ; `roughness` ci-dessous sert aux chiffres.
 const STYLES = {
   marbre: { name: 'Marbre', pattern: 'marble', roughness: 0.18, clearcoat: 1, ccRough: 0.03 },
-  bois:   { name: 'Bois',   pattern: 'wood',  bump: 0.5, roughness: 0.55, clearcoat: 0.35, ccRough: 0.32, tint: ['#a8743f', 0.55] },
-  pierre: { name: 'Pierre', pattern: 'stone', bump: 0.5, roughness: 0.5, clearcoat: 0.15, ccRough: 0.25, tint: ['#9a958c', 0.45] },
+  // Matières photo (textures Poly Haven, CC0) : stain = part de la couleur du dé dans la teinte
+  chene:  { name: 'Chêne',  photo: 'chene',  repeat: 0.55, stain: 0.3,  roughness: 1, normal: 0.6, clearcoat: 0.3, ccRough: 0.35 },
+  noyer:  { name: 'Noyer',  photo: 'noyer',  repeat: 0.5,  stain: 0.25, roughness: 1, normal: 0.6, clearcoat: 0.35, ccRough: 0.3 },
+  granit: { name: 'Granit', photo: 'granit', repeat: 0.75, stain: 0.4,  roughness: 0.7, normal: 0.5, clearcoat: 0.8, ccRough: 0.05 },
   metal:  { name: 'Métal',  pattern: 'metal', bump: 0.5, roughness: 0.4, metalness: 1, envIntensity: 1.3, anisotropy: 0.55, tint: ['#c8ccd2', 0.35] },
   resine: { name: 'Résine', pattern: 'resin', bump: 0.25, roughness: 0.3, clearcoat: 0.45, ccRough: 0.1 },
   verre:  { name: 'Verre', glass: true, roughness: 0.03, transmission: 0.9, thickness: 0.8, attDist: 1.2, whiten: 0.4 },
@@ -669,11 +718,43 @@ function patternTexture1(kind) {
   return patternUV1[kind];
 }
 
+/* ---------- Textures photo (fichiers à côté de la page, dossier textures/) ---------- */
+const PHOTO_DIR = 'textures/';
+const photoCache = {}, photoLabelCache = {};
+function photoMaps(name, repeat) {
+  if (photoCache[name]) return photoCache[name];
+  const loader = new THREE.TextureLoader();
+  const mk = (suf, srgb, onload) => {
+    const t = loader.load(PHOTO_DIR + name + '-' + suf + '.jpg', onload);
+    t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(repeat, repeat); t.anisotropy = 8;
+    if (srgb) t.colorSpace = THREE.SRGBColorSpace;
+    return t;
+  };
+  const out = {};
+  out.map = mk('couleur', true, img => {
+    // version éclaircie pour le creux des chiffres (lisible quelle que soit l'encre)
+    const src = img.image, c = document.createElement('canvas');
+    c.width = src.width; c.height = src.height;
+    const g = c.getContext('2d');
+    g.drawImage(src, 0, 0);
+    g.globalAlpha = 0.6; g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height);
+    const t = new THREE.CanvasTexture(c);
+    t.colorSpace = THREE.SRGBColorSpace; t.wrapS = t.wrapT = THREE.RepeatWrapping;
+    t.repeat.set(repeat, repeat); t.anisotropy = 4; t.channel = 1;
+    photoLabelCache[name] = t;
+    if (STYLES[styleKey].photo === name) for (const d of dice) refreshLabels(d);
+  });
+  out.normalMap = mk('relief', false);
+  out.roughnessMap = mk('rugosite', false);
+  return (photoCache[name] = out);
+}
+
 function labelMaterial(type, text) {
   const st = STYLES[styleKey], t = labelTextures(text);
   return new THREE.MeshPhysicalMaterial({
     color: TYPES[type].ink,
-    map: st.pattern && !st.glass ? patternTexture1(st.pattern) : null,   // matière visible dans le creux (demande utilisateur)
+    map: st.photo ? (photoLabelCache[st.photo] || null)
+      : st.pattern && !st.glass ? patternTexture1(st.pattern) : null,   // matière visible dans le creux   // matière visible dans le creux (demande utilisateur)
     alphaMap: t.alpha, transparent: true,
     normalMap: t.normalMap, normalScale: new THREE.Vector2(1.5, 1.5),
     aoMap: t.ao, aoMapIntensity: 1,
@@ -689,6 +770,17 @@ function refreshLabels(d) {
 
 function dieMaterial(type) {
   const st = STYLES[styleKey];
+  if (st.photo) {
+    const P = photoMaps(st.photo, st.repeat);
+    const color = new THREE.Color('#ffffff').lerp(new THREE.Color(TYPES[type].color), st.stain);
+    return new THREE.MeshPhysicalMaterial({
+      color, map: P.map,
+      normalMap: P.normalMap, normalScale: new THREE.Vector2(st.normal, st.normal),
+      roughness: st.roughness, roughnessMap: P.roughnessMap, metalness: 0,
+      clearcoat: st.clearcoat || 0, clearcoatRoughness: st.ccRough ?? 0.1,
+      envMapIntensity: st.envIntensity || 1,
+    });
+  }
   if (st.glass) {
     // Verre / résine translucide : la lumière traverse le dé et se teinte avec l'épaisseur
     const base = new THREE.Color(TYPES[type].color), white = new THREE.Color('#ffffff');
@@ -734,7 +826,7 @@ const LABEL_FIT = {
   d10:  { h: 1.12, off: 0.15 },
   d12:  { h: 0.78, off: 0 },
   d20:  { h: 0.84, off: -0.04 },
-  d100: { h: 0.86, off: 0.12 },
+  d100: { h: 0.62, off: 0 },
 };
 const templates = {};
 function templateFor(type) {
@@ -857,6 +949,11 @@ function templateFor(type) {
     }
     let up;
     if (type === 'd6') up = verts[f.ids[0]].clone().add(verts[f.ids[1]]).multiplyScalar(.5).sub(f.center);
+    else if (type === 'd100') {
+      // chiffres orientés vers le « pôle » du dé, comme sur un vrai d100
+      const pole = Math.abs(f.normal.y) > 0.95 ? new THREE.Vector3(0, 0, -1) : new THREE.Vector3(0, 1, 0);
+      up = pole.addScaledVector(f.normal, -pole.dot(f.normal));
+    }
     else {
       // haut du chiffre vers le sommet le plus éloigné (pointe du d10, sommet des triangles et pentagones)
       let far = f.ids[0], best = -1;
@@ -889,7 +986,13 @@ function templateFor(type) {
     faces: faces.map(f => f.ids),
   });
 
-  return (templates[type] = { geo, labelInfo, readInfo, shape });
+  // d100 : 100 faces contre 100 faces coûte trop cher en collisions ; on le fait rouler comme
+  // une sphère inscrite (ses facettes sont toutes tangentes à cette sphère), puis on le fait
+  // basculer sur la facette la plus proche quand il ralentit (voir settleFacet).
+  let collider = null;
+  if (type === 'd100') collider = new CANNON.Sphere(Math.min(...faces.map(f => f.normal.dot(f.center))));
+
+  return (templates[type] = { geo, labelInfo, readInfo, shape, collider });
 }
 
 /* =========================================================
@@ -1121,7 +1224,7 @@ function createDie(type) {
 
   const mp = massProps(type, tpl.shape);
   const body = new CANNON.Body({
-    mass: mp.mass, material: diceMat, shape: tpl.shape,
+    mass: mp.mass, material: diceMat, shape: tpl.collider || tpl.shape,
     allowSleep: false,   // l'arrêt est détecté par la page (dé à plat et immobile)
     linearDamping: 0.01, angularDamping: 0.02,   // air : quasi rien, le tapis freine (ROLL_DRAG)
   });
@@ -1324,11 +1427,7 @@ function updateResult() {
   }).join(' ');
   let extra = '';
   // d100 + d10 = jet de pourcentage (00 + 10 → 100)
-  const p = dice.filter(d => d.type === 'd100'), t = dice.filter(d => d.type === 'd10');
-  if (p.length === 1 && t.length === 1) {
-    const pct = (p[0].value + (t[0].value % 10)) || 100;
-    extra = `<br>Pourcentage (d100 + d10) : <b class="total">${pct}</b>`;
-  }
+
   el.innerHTML = dice.length === 1
     ? `${chips} <b class="total">${total}</b>${extra}`
     : `${chips} = <b class="total">${total}</b>${extra}`;
@@ -1678,6 +1777,24 @@ function updateRollingSound() {
 
 /* ---------- Boucle ---------- */
 let prev = performance.now();
+// d100 « sphérique » : en fin de course, il bascule doucement sur la facette du dessous,
+// comme le lest d'un vrai Zocchihedron, pour finir posé bien à plat.
+const _qa = new THREE.Quaternion(), _qb = new THREE.Quaternion(), _down = new THREE.Vector3(0, -1, 0), _nn = new THREE.Vector3();
+function settleFacet(d, v, w, dt) {
+  const b = d.body, rin = b.shapes[0].radius;
+  if (v > 1.5 || w > 4 || b.position.y > rin * 1.15) return;
+  _qa.set(b.quaternion.x, b.quaternion.y, b.quaternion.z, b.quaternion.w);
+  let low = null, ly = Infinity;
+  for (const L of d.labelInfo) { const y = _nn.copy(L.normal).applyQuaternion(_qa).y; if (y < ly) { ly = y; low = L; } }
+  _nn.copy(low.normal).applyQuaternion(_qa);
+  _qb.setFromUnitVectors(_nn, _down);                 // rotation qui pose cette facette à plat
+  _qb.slerp(new THREE.Quaternion(), 1 - Math.min(1, 10 * dt));
+  _qa.premultiply(_qb);
+  b.quaternion.set(_qa.x, _qa.y, _qa.z, _qa.w);
+  b.angularVelocity.scale(0.9, b.angularVelocity);
+  b.velocity.x *= 0.97; b.velocity.z *= 0.97;
+}
+
 function tick(now) {
   const dt = Math.min(0.05, (now - prev) / 1000);
   prev = now;
@@ -1697,6 +1814,7 @@ function tick(now) {
     }
     const b = d.body, age = simTime - d.rollStart;
     const v = b.velocity.length(), w = b.angularVelocity.length();
+    if (d.type === 'd100') settleFacet(d, v, w, dt);
     const align = topAlignment(d);
     // Posé sur une face et presque immobile pendant 0,15 s → arrêté
     const slow = v < 0.6 && w < 1.2 && age > 0.3;
@@ -1855,7 +1973,7 @@ rollAll();
 requestAnimationFrame(tick);
 
 // accès pour tests
-window.__dice = { arena, setSurface, setStyle: k => { styleKey = k; applyStyle(); }, dice, counts, syncDice, rollAll, camera, sim: () => simTime };
+window.__dice = { arena, setSurface, setStyle: k => { styleKey = k; applyStyle(); }, dice, counts, syncDice, rollAll, camera, world, sim: () => simTime };
 </script>
 <script>
   setTimeout(function () { if (!window.__diceLoaded) document.getElementById('err').style.display = 'grid'; }, 8000);
