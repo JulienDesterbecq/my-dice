@@ -82,6 +82,7 @@
   .sheet p { margin: 0 0 12px; color: var(--muted); font-size: 13px; }
   .crow { display: grid; grid-template-columns: 52px 1fr 1fr; align-items: center; gap: 10px; padding: 6px 0; border-top: 1px solid rgba(255,255,255,.08); }
   .crow b { font-size: 15px; }
+  .crow.all { border-top: 0; padding-bottom: 10px; margin-bottom: 4px; border-bottom: 1px solid rgba(255,255,255,.25); }
   .crow label { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
   .crow input[type=color] {
     width: 44px; height: 32px; padding: 0; border: 2px solid rgba(255,255,255,.25); border-radius: 8px;
@@ -127,7 +128,7 @@
 
 <div class="sheet" id="colorSheet" hidden>
   <h2>Couleurs des dés</h2>
-  <p>Corps et chiffres, pour chaque type de dé.</p>
+  <p>Corps et chiffres : pour tous les dés d’un coup, ou type par type.</p>
   <div id="colorRows"></div>
   <div class="actions">
     <button id="colorReset">Couleurs d’origine</button>
@@ -1561,6 +1562,27 @@ function refreshInk(type) {
 }
 function buildColorRows() {
   colorRows.innerHTML = '';
+  // Ligne « Tous les dés » : applique la même couleur à tous les types d'un coup
+  const all = document.createElement('div');
+  all.className = 'crow all';
+  const first = TYPES[Object.keys(TYPES)[0]];
+  all.innerHTML = `<b>Tous</b>
+    <label>Corps <input type="color" id="body-all" value="${first.color}"></label>
+    <label>Chiffres <input type="color" id="ink-all" value="${first.ink}"></label>`;
+  const bAll = all.querySelector('#body-all'), iAll = all.querySelector('#ink-all');
+  bAll.addEventListener('input', () => {
+    for (const k in TYPES) { TYPES[k].color = bAll.value; refreshBody(k); }
+    colorRows.querySelectorAll('[id^="body-d"]').forEach(el => { el.value = bAll.value; });
+  });
+  bAll.addEventListener('change', () => { saveColors(); renderTray(); updateResult(); });
+  const applyAllInk = () => {
+    for (const k in TYPES) if (TYPES[k].ink !== iAll.value) { TYPES[k].ink = iAll.value; refreshInk(k); }
+    colorRows.querySelectorAll('[id^="ink-d"]').forEach(el => { el.value = iAll.value; });
+    saveColors(); updateResult();
+  };
+  iAll.addEventListener('change', applyAllInk);
+  iAll.addEventListener('input', applyAllInk);
+  colorRows.appendChild(all);
   for (const type of Object.keys(TYPES)) {
     const row = document.createElement('div');
     row.className = 'crow';
@@ -1720,6 +1742,34 @@ function ping(t, freq, gain, decay) {
   o.start(t); o.stop(t + decay + 0.02);
 }
 
+// Timbre selon la matière du dé : modes de résonance (Hz, pour un dé de taille 1), durée de la
+// résonance, couleur du « clic » d'attaque et poids (un dé de pierre ou de métal frappe plus fort).
+const SOUND_MATERIALS = {
+  resine: { modes: [3200, 5600],       ring: 0.035, click: [4500, 6500], clickQ: 2.5, weight: 1 },
+  marbre: { modes: [2300, 4300, 6900], ring: 0.07,  click: [3800, 5200], clickQ: 3,   weight: 1.35 },
+  granit: { modes: [2100, 3900, 6400], ring: 0.075, click: [3500, 5000], clickQ: 3,   weight: 1.45 },
+  chene:  { modes: [1350, 2500],       ring: 0.022, click: [1600, 2600], clickQ: 1.5, weight: 0.85 },
+  noyer:  { modes: [1250, 2350],       ring: 0.024, click: [1500, 2400], clickQ: 1.5, weight: 0.85 },
+  metal:  { modes: [2450, 4870, 7930], ring: 0.32,  click: [5500, 8000], clickQ: 4,   weight: 1.8 },
+  verre:  { modes: [3900, 7400, 9800], ring: 0.16,  click: [6000, 9000], clickQ: 4,   weight: 1.2 },
+  paillettes: { modes: [3300, 5800],   ring: 0.045, click: [4500, 6500], clickQ: 2.5, weight: 1 },
+};
+// Réponse du tapis : le feutre étouffe (résonance du dé coupée, aigus atténués, choc sourd),
+// la table en bois est dure (le dé sonne, petite résonance de plateau, roulement plus présent).
+const SOUND_SURFACES = {
+  felt: { damp: 0.25, bright: 0.35, thud: [350, 900], thudGain: 0.9, board: 0,   roll: 1,   rollFreq: 1 },
+  wood: { damp: 1,    bright: 1,    thud: [500, 1600], thudGain: 0.6, board: 0.5, roll: 2.2, rollFreq: 2.2 },
+};
+const soundMat = () => SOUND_MATERIALS[styleKey] || SOUND_MATERIALS.resine;
+const soundSurf = () => SOUND_SURFACES[SURFACES[surfaceKey]?.tex === 'wood' ? 'wood' : 'felt'];
+
+// Résonance propre du dé (ses modes, légèrement désaccordés à chaque choc)
+function ringDie(t, M, pitch, amp, damp) {
+  M.modes.forEach((f, k) => {
+    ping(t, f * pitch * rand(0.97, 1.03), amp * (k ? 0.5 / k : 1), M.ring * damp * rand(0.8, 1.2) / (1 + 0.4 * k));
+  });
+}
+
 // kind : 'felt' (dé / tapis), 'dice' (dé / dé), 'wall' (bord) ; v : vitesse d'impact ; size : rayon
 function clack(v, kind = 'felt', size = 1) {
   if (!audioReady()) return;
@@ -1729,21 +1779,25 @@ function clack(v, kind = 'felt', size = 1) {
   voices = voices.filter(s => t - s < 0.05);
   if (voices.length >= 4 || (voices.length >= 2 && x < 0.25)) return;   // trop de chocs à la fois
   voices.push(t);
-  const amp = Math.pow(x, 1.4);
+  const M = soundMat(), S = soundSurf();
+  const amp = Math.pow(x, 1.4) * M.weight;
   const pitch = 1 / size;                                  // petit dé = son plus aigu
   if (kind === 'dice') {
-    // clic sec de résine : attaque brillante + deux modes aigus très courts
-    noiseHit(t, 'bandpass', rand(4500, 6500) * pitch, 2.5, 0.55 * amp, 0.012);
-    ping(t, rand(3000, 3600) * pitch, 0.22 * amp, rand(0.025, 0.04));
-    ping(t, rand(5200, 6100) * pitch, 0.12 * amp, rand(0.015, 0.025));
+    // dé contre dé : les deux dés sonnent pleinement (le tapis n'amortit pas ce choc)
+    noiseHit(t, 'bandpass', rand(...M.click) * pitch, M.clickQ, 0.5 * amp, 0.012);
+    ringDie(t, M, pitch, 0.2 * amp, 1);
   } else if (kind === 'wall') {
-    // bord de piste : toc boisé, plus mat
-    noiseHit(t, 'bandpass', rand(900, 1300), 3, 0.5 * amp, 0.05);
-    ping(t, rand(2400, 2900) * pitch, 0.06 * amp, 0.02);
+    // bord de piste en bois : toc mat + résonance du dé un peu amortie
+    noiseHit(t, 'bandpass', rand(900, 1300), 3, 0.45 * amp, 0.05);
+    ringDie(t, M, pitch, 0.08 * amp, 0.6);
   } else {
-    // tapis : choc sourd et feutré, la résine ne sonne presque pas
-    noiseHit(t, 'lowpass', 350 + 900 * x, 0.8, 0.9 * amp, 0.03 + 0.03 * x);
-    noiseHit(t, 'bandpass', rand(2200, 3000) * pitch, 4, 0.07 * amp, 0.01);
+    // dé contre le tapis : choc grave (sourd sur feutre, plus sec sur bois)…
+    noiseHit(t, 'lowpass', S.thud[0] + S.thud[1] * x, 0.8, S.thudGain * amp, 0.03 + 0.03 * x);
+    // …claquement de la matière, que le feutre étouffe
+    noiseHit(t, 'bandpass', rand(...M.click) * pitch, M.clickQ, 0.35 * S.bright * amp, 0.01);
+    ringDie(t, M, pitch, 0.12 * S.bright * amp, S.damp);
+    // table en bois : petite résonance grave du plateau
+    if (S.board) ping(t, rand(180, 240), S.board * 0.25 * amp, 0.09);
   }
 }
 
@@ -1771,8 +1825,11 @@ function updateRollingSound() {
     e += vel.x * vel.x + vel.z * vel.z;
   }
   const sp = Math.sqrt(e);
-  rollGain.gain.setTargetAtTime(Math.min(0.05, sp * 0.0025), audioCtx.currentTime, 0.05);
-  rollFilter.frequency.setTargetAtTime(300 + Math.min(900, sp * 25), audioCtx.currentTime, 0.05);
+  // roulement : feutré et grave sur le feutre, plus présent et plus clair sur la table en bois,
+  // plus clair encore pour les dés durs (pierre, métal, verre)
+  const S = soundSurf(), M = soundMat(), hard = Math.min(1.6, M.weight);
+  rollGain.gain.setTargetAtTime(Math.min(0.05 * S.roll, sp * 0.0025 * S.roll * hard), audioCtx.currentTime, 0.05);
+  rollFilter.frequency.setTargetAtTime((300 + Math.min(900, sp * 25)) * S.rollFreq * (0.8 + 0.25 * hard), audioCtx.currentTime, 0.05);
 }
 
 /* ---------- Boucle ---------- */
