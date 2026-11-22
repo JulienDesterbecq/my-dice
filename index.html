@@ -66,6 +66,27 @@
   .chip .badge::after { content: " −"; color: #b91c1c; }
   #shakeBtn[hidden] { display: none; }
 
+  .sheet {
+    position: fixed; left: 50%; bottom: 0; transform: translateX(-50%); z-index: 4;
+    width: min(420px, 100%); max-height: 80%; overflow: auto;
+    padding: 16px max(16px, env(safe-area-inset-left)) max(16px, env(safe-area-inset-bottom));
+    background: rgba(8, 22, 14, 0.94); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+    border-radius: 18px 18px 0 0; box-shadow: 0 -8px 30px rgba(0,0,0,.4);
+  }
+  .sheet[hidden] { display: none; }
+  .sheet h2 { margin: 0 0 4px; font-size: 17px; }
+  .sheet p { margin: 0 0 12px; color: var(--muted); font-size: 13px; }
+  .crow { display: grid; grid-template-columns: 52px 1fr 1fr; align-items: center; gap: 10px; padding: 6px 0; border-top: 1px solid rgba(255,255,255,.08); }
+  .crow b { font-size: 15px; }
+  .crow label { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
+  .crow input[type=color] {
+    width: 44px; height: 32px; padding: 0; border: 2px solid rgba(255,255,255,.25); border-radius: 8px;
+    background: none; cursor: pointer;
+  }
+  .crow input[type=color]::-webkit-color-swatch-wrapper { padding: 0; }
+  .crow input[type=color]::-webkit-color-swatch { border: 0; border-radius: 6px; }
+  .sheet .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
+
   .hint {
     position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
     z-index: 1; pointer-events: none; text-align: center; width: 80%;
@@ -91,9 +112,20 @@
   <div class="panel tray" id="tray"></div>
   <div class="row">
     <button id="styleBtn">Matière : Marbre</button>
+    <button id="colorBtn">🎨 Couleurs</button>
     <button id="clearBtn">Vider</button>
     <button class="primary" id="rollBtn">🎲 Lancer</button>
     <button id="shakeBtn" hidden>📳 Secousse</button>
+  </div>
+</div>
+
+<div class="sheet" id="colorSheet" hidden>
+  <h2>Couleurs des dés</h2>
+  <p>Corps et chiffres, pour chaque type de dé.</p>
+  <div id="colorRows"></div>
+  <div class="actions">
+    <button id="colorReset">Couleurs d’origine</button>
+    <button class="primary" id="colorClose">Terminé</button>
   </div>
 </div>
 
@@ -127,6 +159,11 @@ const TYPES = {
   d20:  { faces: 20, radius: 1.05, color: '#dc2626', ink: '#ffffff' },
   d100: { faces: 10, radius: 0.95, color: '#0d9488', ink: '#ffffff' },
 };
+const DEFAULT_COLORS = Object.fromEntries(Object.entries(TYPES).map(([k, t]) => [k, { color: t.color, ink: t.ink }]));
+try {
+  const saved = JSON.parse(localStorage.getItem('dice-colors') || '{}');
+  for (const k in saved) if (TYPES[k]) Object.assign(TYPES[k], saved[k]);
+} catch (_) {}
 const counts = { d4: 0, d6: 2, d8: 0, d10: 0, d12: 0, d20: 0, d100: 0 };
 
 /* ---------- Construction des polyèdres ---------- */
@@ -357,10 +394,16 @@ function patternTexture(kind) {
   return (patternCache[kind] = tex);
 }
 
-function dieMaterial(type) {
+function bodyColor(type) {
   const st = STYLES[styleKey];
   const color = new THREE.Color(TYPES[type].color);
   if (st.tint) color.lerp(new THREE.Color(st.tint[0]), st.tint[1]);
+  return color;
+}
+
+function dieMaterial(type) {
+  const st = STYLES[styleKey];
+  const color = bodyColor(type);
   const tex = st.pattern ? patternTexture(st.pattern) : null;
   return new THREE.MeshPhysicalMaterial({
     color, map: tex,
@@ -544,6 +587,7 @@ function createDie(type) {
     q.setFromRotationMatrix(m);
     plane.quaternion.copy(q);
     plane.position.copy(L.center).addScaledVector(L.normal, 0.003);
+    plane.userData.text = L.text;
     mesh.add(plane);
   }
   scene.add(mesh);
@@ -744,6 +788,60 @@ canvas.addEventListener('pointerdown', e => {
 });
 
 document.getElementById('rollBtn').addEventListener('click', () => { askMotionPermission(); rollAll(); });
+/* ---------- Couleurs personnalisées ---------- */
+const colorSheet = document.getElementById('colorSheet');
+const colorRows = document.getElementById('colorRows');
+
+function saveColors() {
+  const out = {};
+  for (const k in TYPES) out[k] = { color: TYPES[k].color, ink: TYPES[k].ink };
+  try { localStorage.setItem('dice-colors', JSON.stringify(out)); } catch (_) {}
+}
+function refreshBody(type) {
+  for (const d of dice) if (d.type === type) d.mesh.material.color.copy(bodyColor(type));
+}
+function refreshInk(type) {
+  for (const d of dice) if (d.type === type) {
+    for (const plane of d.mesh.children) {
+      const t = labelTextures(plane.userData.text, TYPES[type].ink);
+      plane.material.map = t.map; plane.material.normalMap = t.normalMap; plane.material.needsUpdate = true;
+    }
+  }
+}
+function buildColorRows() {
+  colorRows.innerHTML = '';
+  for (const type of Object.keys(TYPES)) {
+    const row = document.createElement('div');
+    row.className = 'crow';
+    row.innerHTML = `<b>${type}</b>
+      <label>Corps <input type="color" id="body-${type}" value="${TYPES[type].color}"></label>
+      <label>Chiffres <input type="color" id="ink-${type}" value="${TYPES[type].ink}"></label>`;
+    const body = row.querySelector('#body-' + type), ink = row.querySelector('#ink-' + type);
+    // corps : mise à jour en direct (peu coûteux)
+    body.addEventListener('input', () => { TYPES[type].color = body.value; refreshBody(type); });
+    body.addEventListener('change', () => { saveColors(); renderTray(); updateResult(); });
+    // chiffres : regénère les textures gravées à la validation
+    const applyInk = () => {
+      if (TYPES[type].ink === ink.value) return;
+      TYPES[type].ink = ink.value; refreshInk(type); saveColors(); updateResult();
+    };
+    ink.addEventListener('change', applyInk);
+    ink.addEventListener('blur', applyInk);
+    colorRows.appendChild(row);
+  }
+}
+document.getElementById('colorBtn').addEventListener('click', () => { buildColorRows(); colorSheet.hidden = false; });
+document.getElementById('colorClose').addEventListener('click', () => { colorSheet.hidden = true; });
+document.getElementById('colorReset').addEventListener('click', () => {
+  for (const k in TYPES) {
+    const inkChanged = TYPES[k].ink !== DEFAULT_COLORS[k].ink;
+    Object.assign(TYPES[k], DEFAULT_COLORS[k]);
+    refreshBody(k);
+    if (inkChanged) refreshInk(k);
+  }
+  saveColors(); buildColorRows(); renderTray(); updateResult();
+});
+
 const styleBtn = document.getElementById('styleBtn');
 function applyStyle() {
   styleBtn.textContent = 'Matière : ' + STYLES[styleKey].name;
