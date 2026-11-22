@@ -50,9 +50,9 @@
   button:active { transform: scale(.95); }
   button.primary { background: var(--accent); color: #1c1917; font-weight: 700; padding: 12px 22px; font-size: 16px; }
 
-  .tray { display: flex; gap: 6px; padding: 6px; flex-wrap: wrap; justify-content: center; }
+  .tray { display: flex; gap: 5px; padding: 8px 6px 6px; flex-wrap: wrap; justify-content: center; }
   .chip {
-    position: relative; min-width: 50px; padding: 9px 10px; font-weight: 700; font-size: 15px;
+    position: relative; min-width: 42px; padding: 9px 7px; font-weight: 700; font-size: 14px;
     border-radius: 12px; box-shadow: none; background: rgba(255,255,255,.08);
     border-bottom: 3px solid var(--c);
   }
@@ -65,6 +65,35 @@
   .chip.on .badge { display: block; }
   .chip .badge::after { content: " −"; color: #b91c1c; }
   #shakeBtn[hidden] { display: none; }
+  #surfaceBtn .swatch { display: inline-block; width: 14px; height: 14px; margin: 0 7px -2px 0; border-radius: 50%; background: var(--sw, #2e7a4e); box-shadow: inset 0 0 0 1.5px rgba(255,255,255,.55); }
+  @media (max-width: 480px) { #surfaceBtn { padding: 10px 13px; } #surfaceBtn .lbl { display: none; } #surfaceBtn .swatch { margin: 0 0 -2px; width: 18px; height: 18px; } }
+  /* vignettage léger, comme un objectif photo */
+  .vignette { position: fixed; inset: 0; pointer-events: none; z-index: 1; background: radial-gradient(ellipse 85% 80% at 50% 48%, transparent 55%, rgba(0,0,0,.32) 100%); }
+
+  .sheet {
+    position: fixed; left: 50%; bottom: 0; transform: translateX(-50%); z-index: 4;
+    width: min(420px, 100%); max-height: 80%; overflow: auto;
+    padding: 16px max(16px, env(safe-area-inset-left)) max(16px, env(safe-area-inset-bottom));
+    background: rgba(8, 22, 14, 0.94); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+    border-radius: 18px 18px 0 0; box-shadow: 0 -8px 30px rgba(0,0,0,.4);
+  }
+  .sheet[hidden] { display: none; }
+  .sheet h2 { margin: 0 0 4px; font-size: 17px; }
+  .sheet p { margin: 0 0 12px; color: var(--muted); font-size: 13px; }
+  .crow { display: grid; grid-template-columns: 52px 1fr 1fr; align-items: center; gap: 10px; padding: 6px 0; border-top: 1px solid rgba(255,255,255,.08); }
+  .crow b { font-size: 15px; }
+  .toggle { display: flex; align-items: center; gap: 10px; padding: 8px 0 12px; font-size: 14px; cursor: pointer; }
+  .toggle input { width: 20px; height: 20px; accent-color: var(--accent); }
+  #colorRows.off { opacity: .4; pointer-events: none; }
+  .crow.all { border-top: 0; padding-bottom: 10px; margin-bottom: 4px; border-bottom: 1px solid rgba(255,255,255,.25); }
+  .crow label { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); }
+  .crow input[type=color] {
+    width: 44px; height: 32px; padding: 0; border: 2px solid rgba(255,255,255,.25); border-radius: 8px;
+    background: none; cursor: pointer;
+  }
+  .crow input[type=color]::-webkit-color-swatch-wrapper { padding: 0; }
+  .crow input[type=color]::-webkit-color-swatch { border: 0; border-radius: 6px; }
+  .sheet .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 12px; }
 
   .hint {
     position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
@@ -80,6 +109,7 @@
 </head>
 <body>
 <canvas id="scene"></canvas>
+<div class="vignette"></div>
 
 <div class="bar top">
   <div class="panel result" id="result">Touchez un dé ou secouez le téléphone</div>
@@ -90,9 +120,23 @@
 <div class="bar bottom">
   <div class="panel tray" id="tray"></div>
   <div class="row">
+    <button id="styleBtn">Matière : Marbre</button>
+    <button id="colorBtn">🎨 Couleurs</button>
+    <button id="surfaceBtn" title="Surface de la table" aria-label="Surface de la table"><i class="swatch"></i><span class="lbl">Tapis</span></button>
     <button id="clearBtn">Vider</button>
     <button class="primary" id="rollBtn">🎲 Lancer</button>
     <button id="shakeBtn" hidden>📳 Secousse</button>
+  </div>
+</div>
+
+<div class="sheet" id="colorSheet" hidden>
+  <h2>Couleurs des dés</h2>
+  <p>Corps et chiffres : pour tous les dés d’un coup, ou type par type.</p>
+  <label class="toggle"><input type="checkbox" id="randomColors"> Couleurs aléatoires, nouveau tirage à chaque lancer</label>
+  <div id="colorRows"></div>
+  <div class="actions">
+    <button id="colorReset">Couleurs d’origine</button>
+    <button class="primary" id="colorClose">Terminé</button>
   </div>
 </div>
 
@@ -117,15 +161,29 @@ window.__diceLoaded = true;
    Types de dés
    ========================================================= */
 const MAX_DICE = 12;
+// radius = rayon circonscrit (d10 : demi-hauteur), proportions d'un set standard à 0,075 unité/mm :
+// d4 arête 22 mm, d6 arête 16 mm, d8 22 mm pointe à pointe, d10 20 mm de haut, d12 19 mm et d20 20 mm face à face.
+// fillet = rayon du congé des arêtes (fraction du rayon), seg = segments du congé.
 const TYPES = {
-  d6:   { faces: 6,  radius: 0.85, color: '#f5f0e6', ink: '#b91c1c' },
-  d8:   { faces: 8,  radius: 0.95, color: '#2563eb', ink: '#ffffff' },
-  d10:  { faces: 10, radius: 0.95, color: '#7c3aed', ink: '#ffffff' },
-  d12:  { faces: 12, radius: 1.00, color: '#ea580c', ink: '#ffffff' },
-  d20:  { faces: 20, radius: 1.05, color: '#dc2626', ink: '#ffffff' },
-  d100: { faces: 10, radius: 0.95, color: '#0d9488', ink: '#ffffff' },
+  d4:   { faces: 4,  radius: 1.00, fillet: 0.075, seg: 4, color: '#eab308', ink: '#1c1917' },
+  d6:   { faces: 6,  radius: 1.04, fillet: 0.13,  seg: 5, color: '#db2777', ink: '#ffffff' },
+  d8:   { faces: 8,  radius: 0.82, fillet: 0.07,  seg: 4, color: '#2563eb', ink: '#ffffff' },
+  d10:  { faces: 10, radius: 0.77, fillet: 0.065, seg: 4, color: '#7c3aed', ink: '#ffffff' },
+  d12:  { faces: 12, radius: 0.90, fillet: 0.06,  seg: 4, color: '#ea580c', ink: '#ffffff' },
+  d20:  { faces: 20, radius: 0.94, fillet: 0.045, seg: 3, color: '#dc2626', ink: '#ffffff' },
+  d100: { faces: 100, radius: 1.2, fillet: 0.025, seg: 2, color: '#0d9488', ink: '#ffffff' },   // « Zocchihedron »
 };
-const counts = { d6: 2, d8: 0, d10: 0, d12: 0, d20: 0, d100: 0 };
+const DEFAULT_COLORS = Object.fromEntries(Object.entries(TYPES).map(([k, t]) => [k, { color: t.color, ink: t.ink }]));
+try {
+  const saved = JSON.parse(localStorage.getItem('dice-colors') || '{}');
+  for (const k in saved) if (TYPES[k]) Object.assign(TYPES[k], saved[k]);
+} catch (_) {}
+// Temps simulé ; le résultat ne s'affiche que si tous les dés sont arrêtés depuis un court
+// instant (un dé lu peut encore être bousculé par un voisin)
+let simTime = 0;
+const SETTLE_DELAY = 0.3;
+let lastSettle = -1, resultPending = false;
+const counts = { d4: 0, d6: 2, d8: 0, d10: 0, d12: 0, d20: 0, d100: 0 };
 
 /* ---------- Construction des polyèdres ---------- */
 function trianglesFromGeometry(geo) {
@@ -139,8 +197,9 @@ function trianglesFromGeometry(geo) {
 
 function d10Triangles() {
   // Trapézoèdre pentagonal : faces en cerf-volant planes si h = a(1+cos36°)/(1−cos36°)
+  // (quel que soit le rayon de l'anneau). Un vrai d10 est un peu plus haut que large : h = 1,15 × rayon.
   const c = Math.cos(Math.PI / 5);
-  const h = 1, a = h * (1 - c) / (1 + c);
+  const h = 1.15, a = h * (1 - c) / (1 + c);
   const ring = [];
   for (let i = 0; i < 10; i++) {
     const t = i * Math.PI / 5;
@@ -192,168 +251,976 @@ function buildPolyhedron(tris, radius) {
 function shapeFor(type) {
   const r = TYPES[type].radius;
   switch (type) {
+    case 'd4':  return buildPolyhedron(trianglesFromGeometry(new THREE.TetrahedronGeometry(1)), r);
     case 'd6':  return buildPolyhedron(trianglesFromGeometry(new THREE.BoxGeometry(1, 1, 1)), r);
     case 'd8':  return buildPolyhedron(trianglesFromGeometry(new THREE.OctahedronGeometry(1)), r);
     case 'd12': return buildPolyhedron(trianglesFromGeometry(new THREE.DodecahedronGeometry(1)), r);
     case 'd20': return buildPolyhedron(trianglesFromGeometry(new THREE.IcosahedronGeometry(1)), r);
-    default:    return buildPolyhedron(d10Triangles(), r);     // d10 & d100
+    case 'd100': return buildPolyhedron(zocchiTriangles(), r);
+    default:    return buildPolyhedron(d10Triangles(), r);     // d10
   }
 }
 
-// Valeurs : faces opposées appariées (somme constante, comme sur de vrais dés)
-function faceLabels(type, faces) {
-  const n = faces.length;
-  let list;
-  if (type === 'd10') list = [...Array(10).keys()].map(v => ({ value: v === 0 ? 10 : v, text: String(v) }));
-  else if (type === 'd100') list = [...Array(10).keys()].map(v => ({ value: v * 10, text: v === 0 ? '00' : String(v * 10) }));
-  else list = [...Array(n).keys()].map(v => ({ value: v + 1, text: String(v + 1) }));
-  if (type === 'd10') list.sort((a, b) => (a.text - b.text)); // 0..9
-
-  const out = new Array(n);
-  let j = 0;
-  for (let i = 0; i < n; i++) {
-    if (out[i]) continue;
-    const opp = faces.findIndex((f, k) => k !== i && !out[k] && f.normal.dot(faces[i].normal) < -0.99);
-    out[i] = list[j];
-    if (opp >= 0) out[opp] = list[n - 1 - j];
-    j++;
+// Vrai d100 (type Zocchihedron) : 100 facettes planes tangentes à une sphère.
+// 50 directions réparties en spirale de Fibonacci sur un hémisphère + leurs opposées
+// (faces opposées appariées), enveloppe convexe des points, puis polyèdre dual :
+// chaque point devient une face, chaque triangle de l'enveloppe un sommet.
+function zocchiTriangles() {
+  const N = 50, ga = Math.PI * (3 - Math.sqrt(5)), H = [];
+  for (let i = 0; i < N; i++) {
+    const y = 1 - (i + 0.5) / N, r = Math.sqrt(1 - y * y), t = i * ga;
+    H.push(new THREE.Vector3(r * Math.cos(t), y, r * Math.sin(t)));
   }
+  // Répartition uniforme (problème de Thomson) : chaque point repousse les autres et leurs
+  // opposés, ce qui garde les paires de faces opposées tout en rendant les facettes régulières
+  // (surtout des hexagones, quelques pentagones, comme une balle de golf).
+  const f = H.map(() => new THREE.Vector3()), dv = new THREE.Vector3();
+  for (let it = 0; it < 400; it++) {
+    f.forEach(v => v.set(0, 0, 0));
+    for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) for (const sg of [1, -1]) {
+      if (i === j && sg === 1) continue;
+      dv.copy(H[j]).multiplyScalar(sg).negate().add(H[i]);       // H[i] − (±H[j])
+      const d2 = dv.lengthSq();
+      f[i].addScaledVector(dv, 1 / (d2 * Math.sqrt(d2)));
+    }
+    let mx = 0;
+    f.forEach((v, i) => { v.addScaledVector(H[i], -v.dot(H[i])); mx = Math.max(mx, v.length()); });
+    const step = 0.03 * (1 - it / 400) / mx;
+    H.forEach((p, i) => p.addScaledVector(f[i], step).normalize());
+  }
+  const P = [];
+  H.forEach(p => P.push(p, p.clone().negate()));
+  const n = P.length, hull = [], tmp = new THREE.Vector3(), tmp2 = new THREE.Vector3();
+  for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) for (let k = j + 1; k < n; k++) {
+    const nrm = tmp.subVectors(P[j], P[i]).cross(tmp2.subVectors(P[k], P[i]));
+    let d = nrm.dot(P[i]), sign = 0, ok = true;
+    for (let m = 0; m < n && ok; m++) {
+      if (m === i || m === j || m === k) continue;
+      const sd = nrm.dot(P[m]) - d;
+      if (Math.abs(sd) < 1e-9) continue;
+      const sg = sd > 0 ? 1 : -1;
+      if (!sign) sign = sg; else if (sg !== sign) ok = false;
+    }
+    if (ok) hull.push([i, j, k]);
+  }
+  // sommet dual : intersection des plans tangents en i, j, k (p · x = 1)
+  const M = new THREE.Matrix3(), dual = hull.map(([i, j, k]) => {
+    M.set(P[i].x, P[i].y, P[i].z, P[j].x, P[j].y, P[j].z, P[k].x, P[k].y, P[k].z).invert();
+    return new THREE.Vector3(1, 1, 1).applyMatrix3(M);
+  });
+  const tris = [];
+  P.forEach((p, pi) => {
+    const ring = hull.map((t, ti) => t.includes(pi) ? dual[ti] : null).filter(Boolean);
+    const u = ring[0].clone().sub(p).normalize(), w = p.clone().cross(u);
+    ring.sort((a, b) => Math.atan2(a.clone().sub(p).dot(w), a.clone().sub(p).dot(u)) - Math.atan2(b.clone().sub(p).dot(w), b.clone().sub(p).dot(u)));
+    for (let k = 1; k < ring.length - 1; k++) tris.push([ring[0], ring[k], ring[k + 1]]);
+  });
+  return tris;
+}
+
+// Valeurs : faces opposées appariées (somme constante : d6 = 7, d8 = 9, d10 = 9, d12 = 13, d20 = 21)
+// d6 : 1-2-3 dans le sens trigonométrique autour d'un sommet (dés occidentaux).
+// d10/d100 : chiffres impairs autour d'une pointe, pairs autour de l'autre.
+// d8/d12/d20 : sommes aux sommets équilibrées comme sur les dés de casino/JdR ; d20 : 20 entouré de 2, 8, 14.
+// Recherche locale à graine fixe : la disposition est toujours la même.
+function faceLabels(type, faces) {
+  const n = faces.length, ten = type === 'd10';
+  const K = ten ? 9 : n + 1;                       // somme de deux faces opposées
+  const label = type === 'd10' ? k => ({ value: k || 10, text: String(k) })
+    : k => ({ value: k, text: String(k) });
+  const opp = faces.map(f => faces.findIndex(g => g.normal.dot(f.normal) < -0.99));
+  let num = new Array(n);
+
+  if (type === 'd100') {
+    // 1 à 100 répartis au hasard (graine fixe), faces opposées = 101 comme sur le vrai dé
+    let seed = 4242;
+    const rnd = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
+    const pairs = [];
+    faces.forEach((_, i) => { if (i < opp[i]) pairs.push([i, opp[i]]); });
+    const vals = pairs.map((_, k) => k + 1).sort(() => rnd() - 0.5);
+    pairs.forEach(([i, j], k) => { const a = rnd() < 0.5; num[i] = a ? vals[k] : 101 - vals[k]; num[j] = 101 - num[i]; });
+  } else if (type === 'd6') {
+    const v = faces[0].ids[0];
+    const around = faces.map((_, i) => i).filter(i => faces[i].ids.includes(v));
+    const out = around.reduce((s, i) => s.add(faces[i].normal), new THREE.Vector3()).normalize();
+    const ref = faces[around[0]].normal, w = new THREE.Vector3().crossVectors(out, ref);
+    const ang = i => Math.atan2(faces[i].normal.dot(w), faces[i].normal.dot(ref));
+    around.sort((i, j) => ang(i) - ang(j));
+    around.forEach((fi, k) => { num[fi] = k + 1; num[opp[fi]] = 6 - k; });
+  } else {
+    const pairs = [];
+    faces.forEach((_, i) => { if (i < opp[i]) pairs.push([i, opp[i]]); });
+    const inc = new Map();
+    faces.forEach((f, fi) => f.ids.forEach(id => { if (!inc.has(id)) inc.set(id, []); inc.get(id).push(fi); }));
+    const corners = [...inc.values()].filter(l => !ten || l.length === 3);
+    const top = faces.map(f => f.normal.y > 0);
+    const nb = fi => faces.map((_, j) => j).filter(j => faces[j].ids.filter(id => faces[fi].ids.includes(id)).length === 2);
+    const cost = a => {
+      let c = 0;
+      for (const l of corners) { let s = -l.length * K / 2; for (const fi of l) s += a[fi]; c += s * s; }
+      if (ten) a.forEach((x, fi) => { if (top[fi] !== (x % 2 === 1)) c += 1000; });
+      if (type === 'd20') c += 1000 * (3 - nb(a.indexOf(20)).filter(j => [2, 8, 14].includes(a[j])).length);
+      return c;
+    };
+    let seed = 12345;
+    const rnd = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
+    let best = null, bestC = Infinity;
+    for (let restart = 0; restart < 24 && bestC > 0; restart++) {
+      const pv = pairs.map((_, k) => ten ? k : k + 1).sort(() => rnd() - 0.5), flip = pairs.map(() => rnd() < 0.5);
+      const assign = () => { const a = new Array(n); pairs.forEach(([i, j], k) => { const x = flip[k] ? K - pv[k] : pv[k]; a[i] = x; a[j] = K - x; }); return a; };
+      const move = (p, q, swap) => { if (swap) { [pv[p], pv[q]] = [pv[q], pv[p]]; [flip[p], flip[q]] = [flip[q], flip[p]]; } else flip[p] = !flip[p]; };
+      let cur = cost(assign());
+      for (let it = 0; it < 2500; it++) {
+        const p = Math.floor(rnd() * pairs.length), q = Math.floor(rnd() * pairs.length), swap = rnd() < 0.5 && p !== q;
+        move(p, q, swap);
+        const c = cost(assign());
+        if (c <= cur) cur = c; else move(p, q, swap);
+      }
+      if (cur < bestC) { bestC = cur; best = assign(); }
+    }
+    num = best;
+  }
+  return num.map(label);
+}
+
+/* ---------- Chiffres gravés ---------- */
+// Police dessinée (identique sur tous les appareils, rien à charger) : chiffres bâton gras aux
+// extrémités arrondies, comme gravés à la fraise boule, proportions des dés de jeu (largeur ≈ 0,6 × hauteur).
+// Chaque glyphe est un tracé de ligne médiane dans une boîte de hauteur 1 (y vers le bas), largeur w.
+const GLYPH_STROKE = 0.19, GLYPH_GAP = 0.29;
+const glyph6 = g => {
+  g.moveTo(0.02, 0.69); g.bezierCurveTo(0.0, 0.28, 0.13, 0.0, 0.44, 0.0);
+  g.moveTo(0.5, 0.69); g.ellipse(0.25, 0.69, 0.25, 0.31, 0, 0, Math.PI * 2);
+};
+const GLYPHS = {
+  '0': [0.5, g => { g.moveTo(0, 0.27); g.arc(0.25, 0.27, 0.25, Math.PI, 0); g.lineTo(0.5, 0.73); g.arc(0.25, 0.73, 0.25, 0, Math.PI); g.closePath(); }],
+  '1': [0.3, g => { g.moveTo(0.02, 0.24); g.lineTo(0.3, 0); g.lineTo(0.3, 1); }],
+  '2': [0.5, g => { g.arc(0.25, 0.26, 0.25, Math.PI - 0.3, Math.PI * 2 + 0.5); g.lineTo(0, 1); g.lineTo(0.52, 1); }],
+  '3': [0.5, g => { g.arc(0.24, 0.235, 0.235, Math.PI + 0.35, Math.PI * 2.5); g.arc(0.25, 0.735, 0.265, -Math.PI / 2, Math.PI - 0.4); }],
+  '4': [0.52, g => { g.moveTo(0.37, 1); g.lineTo(0.37, 0); g.lineTo(0, 0.7); g.lineTo(0.52, 0.7); }],
+  '5': [0.5, g => { g.moveTo(0.47, 0); g.lineTo(0.07, 0); g.lineTo(0.25 + 0.26 * Math.cos(-2.2), 0.68 + 0.32 * Math.sin(-2.2)); g.ellipse(0.25, 0.68, 0.26, 0.32, 0, -2.2, Math.PI - 0.45); }],
+  '6': [0.5, glyph6],
+  '7': [0.5, g => { g.moveTo(0, 0); g.lineTo(0.5, 0); g.quadraticCurveTo(0.28, 0.42, 0.2, 1); }],
+  '8': [0.5, g => { g.moveTo(0.465, 0.235); g.ellipse(0.25, 0.235, 0.215, 0.235, 0, 0, Math.PI * 2); g.moveTo(0.5, 0.735); g.ellipse(0.25, 0.735, 0.25, 0.265, 0, 0, Math.PI * 2); }],
+  '9': [0.5, g => { g.translate(0.5, 1); g.rotate(Math.PI); glyph6(g); }],   // 6 retourné, comme sur les dés
+};
+// Échelle de la texture : px par unité de hauteur de glyphe (assez de marge pour « 00 » et le soulignement)
+const LABEL_S = 256, LABEL_K = 144;
+const LABEL_DIGIT = (1 + GLYPH_STROKE) * LABEL_K / LABEL_S;   // hauteur des chiffres / taille du plan
+
+// Masque (forme du chiffre) et carte de normales (parois du creux, éclairées par la vraie lumière).
+// Profil du creux : fond plat, parois raides arrondies vers le haut, calculé à partir de la distance au bord.
+// L'occlusion reste uniforme (aucune ombre peinte) : alpha (canal G) et ao (canal R) partagent une texture.
+// La couleur vient du matériau : couleur des chiffres × texture de la matière.
+const texCache = new Map();
+function labelTextures(text) {
+  if (texCache.has(text)) return texCache.get(text);
+  const S = LABEL_S, K = LABEL_K;
+  const mask = document.createElement('canvas'); mask.width = mask.height = S;
+  const mg = mask.getContext('2d');
+  mg.fillStyle = '#000'; mg.fillRect(0, 0, S, S);
+  mg.strokeStyle = '#fff'; mg.lineCap = mg.lineJoin = 'round';
+  const chars = [...text];
+  const total = chars.reduce((s, c) => s + GLYPHS[c][0], 0) + GLYPH_GAP * (chars.length - 1);
+  let x = S / 2 - total * K / 2;
+  for (const c of chars) {
+    mg.setTransform(K, 0, 0, K, x, S / 2 - K / 2);
+    mg.beginPath(); GLYPHS[c][1](mg);
+    mg.setTransform(K, 0, 0, K, x, S / 2 - K / 2);
+    mg.lineWidth = GLYPH_STROKE; mg.stroke();
+    x += (GLYPHS[c][0] + GLYPH_GAP) * K;
+  }
+  if (text === '6' || text === '9') {          // repère 6/9 : soulignement
+    mg.setTransform(K, 0, 0, K, S / 2 - total * K / 2, S / 2 - K / 2);
+    mg.beginPath(); mg.moveTo(0.04, 1.29); mg.lineTo(0.46, 1.29);
+    mg.lineWidth = 0.14; mg.stroke();
+  }
+  mg.setTransform(1, 0, 0, 1, 0, 0);
+
+  const px = mg.getImageData(0, 0, S, S).data;
+  const N = S * S, m = new Float32Array(N), d = new Float32Array(N);
+  for (let i = 0; i < N; i++) { m[i] = px[i * 4] / 255; d[i] = m[i] > 0.5 ? 1e4 : 0; }
+  // distance (chanfrein 3×3) de chaque pixel du chiffre au bord
+  const D = Math.SQRT2;
+  for (let y = 1; y < S - 1; y++) for (let x = 1; x < S - 1; x++) {
+    const i = y * S + x; if (!d[i]) continue;
+    d[i] = Math.min(d[i], d[i - 1] + 1, d[i - S] + 1, d[i - S - 1] + D, d[i - S + 1] + D);
+  }
+  for (let y = S - 2; y > 0; y--) for (let x = S - 2; x > 0; x--) {
+    const i = y * S + x; if (!d[i]) continue;
+    d[i] = Math.min(d[i], d[i + 1] + 1, d[i + S] + 1, d[i + S + 1] + D, d[i + S - 1] + D);
+  }
+  // hauteur : 1 au bord, 0 au fond ; paroi sur WALL px (bord légèrement arrondi en haut)
+  const WALL = 5;
+  let h = new Float32Array(N);
+  for (let i = 0; i < N; i++) {
+    const t = Math.min(1, Math.max(0, (m[i] > 0.5 ? d[i] - 0.5 : m[i] - 0.5) / WALL));
+    h[i] = 1 - t * t * (3 - 2 * t);
+  }
+  h = boxBlur(h, S, 1);
+
+  const toTexture = fill => {
+    const c = document.createElement('canvas'); c.width = c.height = S;
+    const g = c.getContext('2d'), img = g.createImageData(S, S);
+    for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) fill(img.data, (y * S + x) * 4, x, y);
+    g.putImageData(img, 0, 0);
+    const t = new THREE.CanvasTexture(c); t.anisotropy = 4;
+    return t;
+  };
+  const DEPTH = 3.2;    // pente des parois (≈ 45° avant normalScale)
+  const at = (x, y) => h[Math.min(S - 1, Math.max(0, y)) * S + Math.min(S - 1, Math.max(0, x))];
+  const normalMap = toTexture((o, i, x, y) => {
+    const nx = -(at(x + 1, y) - at(x - 1, y)) * DEPTH / 2, ny = (at(x, y + 1) - at(x, y - 1)) * DEPTH / 2;
+    const l = Math.hypot(nx, ny, 1);
+    o[i] = (nx / l * .5 + .5) * 255; o[i + 1] = (ny / l * .5 + .5) * 255; o[i + 2] = (1 / l * .5 + .5) * 255; o[i + 3] = 255;
+  });
+  const maskAo = toTexture((o, i, x, y) => {
+    const v = px[(y * S + x) * 4];
+    o[i] = 255; o[i + 1] = o[i + 2] = v; o[i + 3] = 255;     // R : ao uniforme, G : masque
+  });
+  const out = { alpha: maskAo, normalMap, ao: maskAo };
+  texCache.set(text, out);
   return out;
 }
 
-/* ---------- Textures des faces ---------- */
-const texCache = new Map();
-function labelTexture(text, ink, pips) {
-  const k = text + ink + pips;
-  if (texCache.has(k)) return texCache.get(k);
-  const S = 256, cv = document.createElement('canvas');
-  cv.width = cv.height = S;
-  const g = cv.getContext('2d');
-  g.fillStyle = ink;
-  if (pips) {
-    const P = {
-      1: [[.5, .5]], 2: [[.25, .25], [.75, .75]], 3: [[.25, .25], [.5, .5], [.75, .75]],
-      4: [[.25, .25], [.75, .25], [.25, .75], [.75, .75]],
-      5: [[.25, .25], [.75, .25], [.5, .5], [.25, .75], [.75, .75]],
-      6: [[.25, .22], [.75, .22], [.25, .5], [.75, .5], [.25, .78], [.75, .78]],
-    }[text];
-    const r = text === '1' ? S * .13 : S * .095;
-    for (const [x, y] of P) { g.beginPath(); g.arc(x * S, y * S, r, 0, Math.PI * 2); g.fill(); }
-  } else {
-    const size = text.length > 1 ? 120 : 150;
-    g.font = `800 ${size}px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif`;
-    g.textAlign = 'center'; g.textBaseline = 'middle';
-    g.fillText(text, S / 2, S / 2 + size * 0.04);
-    if (text === '6' || text === '9') g.fillRect(S / 2 - 34, S / 2 + size * 0.42, 68, 12);  // repère 6/9
+function boxBlur(src, S, r) {
+  const tmp = new Float32Array(S * S), dst = new Float32Array(S * S), n = 2 * r + 1;
+  for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+    let sum = 0; for (let k = -r; k <= r; k++) sum += src[y * S + Math.min(S - 1, Math.max(0, x + k))];
+    tmp[y * S + x] = sum / n;
   }
-  const tex = new THREE.CanvasTexture(cv);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  tex.anisotropy = 4;
-  texCache.set(k, tex);
-  return tex;
+  for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+    let sum = 0; for (let k = -r; k <= r; k++) sum += tmp[Math.min(S - 1, Math.max(0, y + k)) * S + x];
+    dst[y * S + x] = sum / n;
+  }
+  return dst;
+}
+
+/* ---------- Matières (textures procédurales) ---------- */
+// Chaque matière = une carte de couleur en niveaux de gris (teintée par la couleur du dé)
+// + une carte « données » linéaire : R = relief (bumpMap), G = rugosité, B = métal
+// (+ une normalMap pour les paillettes). Rugosité/métal absolus dans la carte : le
+// matériau du corps utilise roughness = metalness = 1 ; `roughness` ci-dessous sert aux chiffres.
+const STYLES = {
+  marbre: { name: 'Marbre', pattern: 'marble', roughness: 0.18, clearcoat: 1, ccRough: 0.03 },
+  // Matières photo (textures Poly Haven, CC0) : stain = part de la couleur du dé dans la teinte
+  chene:  { name: 'Chêne',  photo: 'chene',  repeat: 0.55, stain: 0.3,  roughness: 1, normal: 0.6, clearcoat: 0.3, ccRough: 0.35 },
+  noyer:  { name: 'Noyer',  photo: 'noyer',  repeat: 0.5,  stain: 0.25, roughness: 1, normal: 0.6, clearcoat: 0.35, ccRough: 0.3 },
+  granit: { name: 'Granit', photo: 'granit', repeat: 0.75, stain: 0.4,  roughness: 0.7, normal: 0.5, clearcoat: 0.8, ccRough: 0.05 },
+  metal:  { name: 'Métal',  pattern: 'metal', bump: 0.5, roughness: 0.4, metalness: 1, envIntensity: 1.3, anisotropy: 0.55, tint: ['#c8ccd2', 0.35] },
+  resine: { name: 'Résine', pattern: 'resin', bump: 0.25, roughness: 0.3, clearcoat: 0.45, ccRough: 0.1 },
+  verre:  { name: 'Verre', glass: true, roughness: 0.03, transmission: 0.9, thickness: 0.8, attDist: 1.2, whiten: 0.4 },
+  paillettes: { name: 'Paillettes', glass: true, pattern: 'sparkle', roughness: 0.2, transmission: 0.8, thickness: 0.8, attDist: 1.0, whiten: 0.3, sparkle: true },
+};
+let styleKey = 'marbre';
+try { const v = localStorage.getItem('dice-style'); if (STYLES[v]) styleKey = v; } catch (_) {}
+
+function hash2(x, y, s) {
+  let h = Math.imul(x, 374761393) ^ Math.imul(y, 668265263) ^ Math.imul(s, 1442695041);
+  h = Math.imul(h ^ (h >>> 13), 1274126177);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
+// Bruit de valeur sur une table 256×256 précalculée (bien plus rapide que de hacher chaque coin)
+const NOISE_T = (() => { const t = new Float32Array(65536); for (let i = 0; i < 65536; i++) t[i] = hash2(i & 255, i >> 8, 7); return t; })();
+function vnoise(x, y, s) {
+  const xi = Math.floor(x), yi = Math.floor(y);
+  let xf = x - xi, yf = y - yi;
+  xf = xf * xf * (3 - 2 * xf); yf = yf * yf * (3 - 2 * yf);
+  const x0 = (xi + s * 157) & 255, x1 = (x0 + 1) & 255, y0 = ((yi + s * 89) & 255) << 8, y1 = (y0 + 256) & 65280;
+  const a = NOISE_T[y0 + x0], b = NOISE_T[y0 + x1], c = NOISE_T[y1 + x0], d = NOISE_T[y1 + x1];
+  return a + (b - a) * xf + (c - a) * yf + (a - b - c + d) * xf * yf;
+}
+function fbm(x, y, oct, s) {
+  let v = 0, amp = 0.5, f = 1, norm = 0;
+  for (let i = 0; i < oct; i++) { v += amp * vnoise(x * f, y * f, s + i); norm += amp; f *= 2; amp *= 0.5; }
+  return v / norm;
+}
+const clamp01 = x => x < 0 ? 0 : x > 1 ? 1 : x;
+const smooth = (a, b, x) => { const t = clamp01((x - a) / (b - a)); return t * t * (3 - 2 * t); };
+
+// Génère (une fois, en cache) les cartes d'une matière
+const patternCache = {};
+function patternMaps(kind) {
+  if (patternCache[kind]) return patternCache[kind];
+  const S = 512, N = S * S;
+  const col = new Float32Array(N).fill(1), hgt = new Float32Array(N).fill(0.5);
+  const rgh = new Float32Array(N).fill(0.5), mtl = new Float32Array(N);
+  let nrm = null;           // normales de paillettes (x, y) ou null
+  const mk = () => { const c = document.createElement('canvas'); c.width = c.height = S; return c; };
+  const cCol = mk(), cDat = mk();
+  let strokes = null;       // rayures dessinées après coup (métal, résine)
+
+  if (kind === 'marble') {
+    // Veines qui « coulent » dans une direction (sinus perturbé par turbulence),
+    // réseau de fines veines secondaires, et une copie large et pâle des veines
+    // qui simule leur prolongement sous la surface, vu à travers le vernis.
+    for (let y = 0, i = 0; y < S; y++) for (let x = 0; x < S; x++, i++) {
+      const u = x / S, v = y / S;
+      const wx = u + 0.22 * fbm(u * 3, v * 3, 3, 1), wy = v + 0.22 * fbm(u * 3 + 5.2, v * 3 + 1.3, 3, 2);
+      const t = fbm(wx * 4, wy * 4, 4, 3);
+      const s1 = 1 - Math.abs(Math.sin((wx * 1.3 + wy * 0.8) * 13 + t * 8));
+      const r2 = 1 - Math.abs(2 * fbm(wx * 12 + 3.1, wy * 12, 3, 11) - 1);
+      const cloud = 0.6 * vnoise(u * 5, v * 5, 17) + 0.4 * vnoise(u * 11, v * 11, 18);
+      const vein = Math.pow(s1, 26) * (0.55 + 0.45 * smooth(0.3, 0.6, t));
+      const deep = Math.pow(s1, 4), thin = Math.pow(r2, 40) * smooth(0.35, 0.7, cloud);
+      const milk = smooth(0.4, 0.75, t);                      // nuages laiteux plus clairs
+      col[i] = 0.9 + 0.1 * milk - 0.07 * cloud - 0.2 * deep - 0.5 * vein - 0.3 * thin;
+      rgh[i] = 0.14 + 0.1 * vein + 0.06 * thin + 0.05 * cloud;
+      hgt[i] = 0.5 - 0.2 * vein;
+    }
+  } else if (kind === 'wood') {
+    // Cernes en arcs (débit sur dosse) : bois de printemps clair et poreux, bois d'été
+    // sombre et dense qui finit net ; fibres, pores allongés, rayons médullaires.
+    for (let y = 0, i = 0; y < S; y++) for (let x = 0; x < S; x++, i++) {
+      const u = x / S, v = y / S;
+      const warp = fbm(u * 2.5, v * 4, 3, 3) - 0.5;
+      // plan de coupe légèrement incliné par rapport au tronc : arcs « en cathédrale »
+      const dist = Math.hypot(v - 0.5 + 0.06 * warp, 0.1 + 0.22 * u);
+      const rp = dist * 56 + warp * 1.2 + 0.12 * (vnoise(u * 2, v * 30, 5) - 0.5);
+      const ri = Math.floor(rp), f = rp - ri;
+      const rv = hash2(ri, 0, 41), rw = hash2(ri, 1, 42);      // chaque cerne un peu différent
+      const late = smooth(0.6 + 0.22 * rv, 0.95, f) * (1 - smooth(0.98, 1, f));
+      const fiber = 0.6 * vnoise(u * 7, v * 230, 13) + 0.4 * vnoise(u * 3, v * 90, 14) - 0.5;
+      const pore = smooth(0.8, 0.9, vnoise(u * 80, v * 420, 19)) * (1 - smooth(0.1, 0.35, f)) * (0.5 + 0.5 * rw);
+      const ray = smooth(0.88, 0.95, vnoise(u * 24, v * 300, 23));
+      const stain = fbm(u * 2, v * 2, 2, 29) - 0.5;
+      col[i] = 0.93 - 0.1 * rv - 0.4 * late - 0.12 * smooth(0.3, 0.7, f) + 0.2 * fiber - 0.3 * pore + 0.06 * ray + 0.1 * stain;
+      rgh[i] = 0.55 - 0.15 * late + 0.3 * pore - 0.08 * ray + 0.1 * fiber;
+      hgt[i] = 0.5 - 0.45 * pore + 0.1 * fiber;
+    }
+  } else if (kind === 'stone') {
+    // Granit poli : petits cristaux (Voronoï déformé) de feldspath clair, quartz gris
+    // et mica noir, parsemés de gros cristaux de feldspath ; joints un peu creux et plus mats.
+    let d1, d2, id;
+    const voro = (px, py, s) => {
+      const cx = Math.floor(px), cy = Math.floor(py);
+      d1 = d2 = 9; id = 0;
+      for (let j = -1; j <= 1; j++) for (let k = -1; k <= 1; k++) {
+        const gx = cx + k, gy = cy + j;
+        const dx = gx + hash2(gx, gy, s) - px, dy = gy + hash2(gx, gy, s + 1) - py, d = dx * dx + dy * dy;
+        if (d < d1) { d2 = d1; d1 = d; id = gx * 7919 + gy; } else if (d < d2) d2 = d;
+      }
+      return smooth(0, 0.1, Math.sqrt(d2) - Math.sqrt(d1));
+    };
+    for (let y = 0, i = 0; y < S; y++) for (let x = 0; x < S; x++, i++) {
+      const u = x / S, v = y / S;
+      const wu = u + 0.035 * (fbm(u * 5, v * 5, 2, 5) - 0.5) + 0.008 * (vnoise(u * 60, v * 60, 7) - 0.5);
+      const wv = v + 0.035 * (fbm(u * 5 + 9, v * 5, 2, 6) - 0.5) + 0.008 * (vnoise(u * 60 + 3, v * 60, 8) - 0.5);
+      // gros cristaux (phénocristaux) : une cellule grossière sur cinq
+      const bigEdge = voro(wu * 36, wv * 36, 31), big = hash2(id, 7, 8) < 0.2, bigShade = hash2(id, 9, 10);
+      let edge = voro(wu * 120, wv * 120, 1);
+      const m = 0.8 * hash2(id, 3, 4) + 0.2 * vnoise(u * 7, v * 7, 9), shade = hash2(id, 5, 6);
+      const fine = vnoise(u * 170, v * 170, 8) - 0.5, mott = vnoise(u * 3, v * 3, 10) - 0.5;
+      let c, r, h;
+      if (big) { c = 0.8 + 0.18 * bigShade + 0.05 * fine; r = 0.36; h = 0.54; edge = bigEdge; }   // feldspath (gros)
+      else if (m < 0.2) { c = 0.14 + 0.14 * shade; r = 0.22; h = 0.46; }        // mica / biotite
+      else if (m < 0.48) { c = 0.42 + 0.2 * shade; r = 0.28; h = 0.56; }        // quartz
+      else { c = 0.7 + 0.3 * shade; r = 0.4; h = 0.52; }                       // feldspath
+      col[i] = (c + 0.07 * fine + 0.06 * mott) * (0.85 + 0.15 * edge);
+      rgh[i] = r + 0.25 * (1 - edge) + 0.08 * fine;
+      hgt[i] = h * (0.65 + 0.35 * edge) + 0.06 * fine;
+    }
+  } else if (kind === 'metal') {
+    // Métal brossé : stries le long de u, voile de polissage, puis micro-rayures
+    for (let y = 0, i = 0; y < S; y++) for (let x = 0; x < S; x++, i++) {
+      const u = x / S, v = y / S;
+      const s = 0.5 * vnoise(u * 5, v * 250, 21) + 0.3 * vnoise(u * 9, v * 120, 22) + 0.2 * vnoise(u * 2, v * 50, 23);
+      const blot = fbm(u * 3, v * 3, 3, 4) - 0.5;
+      col[i] = 0.86 + 0.16 * (s - 0.5) + 0.08 * blot;
+      rgh[i] = 0.4 + 0.14 * (s - 0.5) + 0.1 * blot;
+      hgt[i] = 0.5 + 0.25 * (s - 0.5);
+      mtl[i] = 1;
+    }
+    strokes = { n: 140, along: 0.6, col: 'rgba(255,255,255,0.10)', dat: 'rgba(70,175,255,0.35)' };
+  } else if (kind === 'resin') {
+    // Plastique moulé : pigment très légèrement nuageux, grain fin, lustre irrégulier
+    for (let y = 0, i = 0; y < S; y++) for (let x = 0; x < S; x++, i++) {
+      const u = x / S, v = y / S;
+      const cl = fbm(u * 3, v * 3, 3, 1), fine = vnoise(u * 200, v * 200, 2) - 0.5;
+      col[i] = 0.97 - 0.06 * cl + 0.02 * fine;
+      rgh[i] = 0.26 + 0.08 * (fbm(u * 12, v * 12, 3, 3) - 0.5) + 0.05 * fine;
+      hgt[i] = 0.5 + 0.3 * fine;
+    }
+    strokes = { n: 60, along: 0, col: 'rgba(255,255,255,0.035)', dat: 'rgba(90,150,0,0.25)' };
+  } else if (kind === 'sparkle') {
+    // Paillettes : petites écailles plates orientées au hasard. Leur normale propre
+    // les fait scintiller seulement sous le bon angle ; presque opaques et métalliques.
+    // Ici la carte « couleur » sert de masque (émission très faible des paillettes).
+    nrm = new Float32Array(N * 2);
+    col.fill(0);
+    hgt.fill(1);              // R = transmission (1 = verre, 0 = paillette)
+    rgh.fill(0.06);
+    const C = 7, n = Math.ceil(S / C);
+    for (let gy = 0; gy < n; gy++) for (let gx = 0; gx < n; gx++) {
+      if (hash2(gx, gy, 51) > 0.6) continue;
+      const fx = (gx + 0.2 + 0.6 * hash2(gx, gy, 52)) * C, fy = (gy + 0.2 + 0.6 * hash2(gx, gy, 53)) * C;
+      const rad = 1.1 + 1.4 * hash2(gx, gy, 54), ang = 6.283 * hash2(gx, gy, 55);
+      const tilt = 0.8 * Math.sqrt(hash2(gx, gy, 56)), az = 6.283 * hash2(gx, gy, 57);
+      const nx = Math.sin(tilt) * Math.cos(az), ny = Math.sin(tilt) * Math.sin(az);
+      const ca = Math.cos(ang), sa = Math.sin(ang), bright = 0.5 + 0.5 * hash2(gx, gy, 58);
+      for (let y = Math.floor(fy - rad - 1); y <= fy + rad + 1; y++) for (let x = Math.floor(fx - rad - 1); x <= fx + rad + 1; x++) {
+        if (x < 0 || y < 0 || x >= S || y >= S) continue;
+        const dx = x + 0.5 - fx, dy = y + 0.5 - fy;
+        const a = Math.abs(dx * ca + dy * sa), b = Math.abs(-dx * sa + dy * ca);
+        if (Math.max(a, (a + b * 1.732) / 2) > rad) continue;   // hexagone
+        const i = y * S + x;
+        nrm[2 * i] = nx; nrm[2 * i + 1] = ny;
+        hgt[i] = 0.2; rgh[i] = 0.14; mtl[i] = 0.85; col[i] = bright;
+      }
+    }
+  }
+
+  // Écriture des canvas
+  const gc = cCol.getContext('2d'), gd = cDat.getContext('2d');
+  const ic = gc.createImageData(S, S), id = gd.createImageData(S, S);
+  const dc = ic.data, dd = id.data;
+  for (let i = 0, o = 0; i < N; i++, o += 4) {
+    const b = clamp01(col[i]) * 255;
+    dc[o] = dc[o + 1] = dc[o + 2] = b; dc[o + 3] = 255;
+    dd[o] = clamp01(hgt[i]) * 255; dd[o + 1] = clamp01(rgh[i]) * 255; dd[o + 2] = mtl[i] * 255; dd[o + 3] = 255;
+  }
+  gc.putImageData(ic, 0, 0); gd.putImageData(id, 0, 0);
+  if (strokes) {
+    // Micro-rayures : courtes lignes courbes, surtout dans le sens du brossage
+    let seed = 0;
+    const rnd = () => hash2(seed++, 77, 99);
+    gc.lineCap = gd.lineCap = 'round';
+    for (let k = 0; k < strokes.n; k++) {
+      const x0 = rnd() * S, y0 = rnd() * S, len = 15 + 110 * rnd() * rnd();
+      const a = rnd() < strokes.along ? (rnd() - 0.5) * 0.35 : rnd() * 6.28;
+      const x1 = x0 + Math.cos(a) * len, y1 = y0 + Math.sin(a) * len;
+      const bx = (x0 + x1) / 2 + (rnd() - 0.5) * len * 0.2, by = (y0 + y1) / 2 + (rnd() - 0.5) * len * 0.2;
+      const w = 0.5 + 0.8 * rnd();
+      for (const [g, s] of [[gc, strokes.col], [gd, strokes.dat]]) {
+        g.strokeStyle = s; g.lineWidth = w;
+        g.beginPath(); g.moveTo(x0, y0); g.quadraticCurveTo(bx, by, x1, y1); g.stroke();
+      }
+    }
+  }
+  const map = new THREE.CanvasTexture(cCol);
+  map.colorSpace = THREE.SRGBColorSpace;
+  const data = new THREE.CanvasTexture(cDat);          // données linéaires (pas de sRGB)
+  let normalMap = null;
+  if (nrm) {
+    const cN = mk(), gn = cN.getContext('2d'), inn = gn.createImageData(S, S), dn = inn.data;
+    for (let i = 0, o = 0; i < N; i++, o += 4) {
+      const nx = nrm[2 * i], ny = nrm[2 * i + 1], nz = Math.sqrt(Math.max(0, 1 - nx * nx - ny * ny));
+      dn[o] = (nx * 0.5 + 0.5) * 255; dn[o + 1] = (ny * 0.5 + 0.5) * 255; dn[o + 2] = (nz * 0.5 + 0.5) * 255; dn[o + 3] = 255;
+    }
+    gn.putImageData(inn, 0, 0);
+    normalMap = new THREE.CanvasTexture(cN);
+    // pas de mipmap linéaire flou : les paillettes doivent rester nettes de près
+    normalMap.minFilter = THREE.LinearMipmapNearestFilter;
+  }
+  for (const t of [map, data, normalMap]) if (t) t.anisotropy = 8;
+  return (patternCache[kind] = { map, data, normalMap });
+}
+function patternTexture(kind) { return patternMaps(kind).map; }
+
+// Couleurs d'un dé : les siennes en mode aléatoire, sinon celles de son type
+const colOf = (type, d) => (d && d.rand) || TYPES[type];
+
+function bodyColor(type, d) {
+  const st = STYLES[styleKey];
+  const color = new THREE.Color(colOf(type, d).color);
+  if (st.tint) color.lerp(new THREE.Color(st.tint[0]), st.tint[1]);
+  return color;
+}
+
+// Texture de matière lue via uv1 (coordonnées de la face) pour les chiffres
+const patternUV1 = {};
+function patternTexture1(kind) {
+  if (!patternUV1[kind]) {
+    // version éclaircie de la matière : on la devine dans le creux sans nuire à la lisibilité
+    const src = patternTexture(kind).image, c = document.createElement('canvas');
+    c.width = src.width; c.height = src.height;
+    const g = c.getContext('2d');
+    g.drawImage(src, 0, 0);
+    g.globalAlpha = 0.65; g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height);
+    const t = new THREE.CanvasTexture(c);
+    t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4; t.channel = 1;
+    patternUV1[kind] = t;
+  }
+  return patternUV1[kind];
+}
+
+/* ---------- Textures photo (fichiers à côté de la page, dossier textures/) ---------- */
+const PHOTO_DIR = 'textures/';
+const photoCache = {}, photoLabelCache = {};
+function photoMaps(name, repeat) {
+  if (photoCache[name]) return photoCache[name];
+  const loader = new THREE.TextureLoader();
+  const mk = (suf, srgb, onload) => {
+    const t = loader.load(PHOTO_DIR + name + '-' + suf + '.jpg', onload);
+    t.wrapS = t.wrapT = THREE.RepeatWrapping; t.repeat.set(repeat, repeat); t.anisotropy = 8;
+    if (srgb) t.colorSpace = THREE.SRGBColorSpace;
+    return t;
+  };
+  const out = {};
+  out.map = mk('couleur', true, img => {
+    // version éclaircie pour le creux des chiffres (lisible quelle que soit l'encre)
+    const src = img.image, c = document.createElement('canvas');
+    c.width = src.width; c.height = src.height;
+    const g = c.getContext('2d');
+    g.drawImage(src, 0, 0);
+    g.globalAlpha = 0.6; g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height);
+    const t = new THREE.CanvasTexture(c);
+    t.colorSpace = THREE.SRGBColorSpace; t.wrapS = t.wrapT = THREE.RepeatWrapping;
+    t.repeat.set(repeat, repeat); t.anisotropy = 4; t.channel = 1;
+    photoLabelCache[name] = t;
+    if (STYLES[styleKey].photo === name) for (const d of dice) refreshLabels(d);
+  });
+  out.normalMap = mk('relief', false);
+  out.roughnessMap = mk('rugosite', false);
+  return (photoCache[name] = out);
+}
+
+function labelMaterial(type, text, d) {
+  const st = STYLES[styleKey], t = labelTextures(text);
+  return new THREE.MeshPhysicalMaterial({
+    color: colOf(type, d).ink,
+    map: st.photo ? (photoLabelCache[st.photo] || null)
+      : st.pattern && !st.glass ? patternTexture1(st.pattern) : null,   // matière visible dans le creux
+    alphaMap: t.alpha, transparent: true,
+    normalMap: t.normalMap, normalScale: new THREE.Vector2(1.5, 1.5),
+    aoMap: t.ao, aoMapIntensity: 1,
+    // peinture du fond de gravure : un peu plus mate que le corps (sauf sur le métal, laissé nu)
+    roughness: Math.min(1, (st.roughness ?? 0.4) + 0.15), metalness: st.metalness || 0,
+    envMapIntensity: st.envIntensity || 1,
+    polygonOffset: true, polygonOffsetFactor: -2, depthWrite: false,
+  });
+}
+function refreshLabels(d) {
+  for (const plane of d.mesh.children) { plane.material.dispose(); plane.material = labelMaterial(d.type, plane.userData.text, d); }
+}
+
+function dieMaterial(type, d) {
+  const st = STYLES[styleKey];
+  if (st.photo) {
+    const P = photoMaps(st.photo, st.repeat);
+    const color = new THREE.Color('#ffffff').lerp(new THREE.Color(colOf(type, d).color), st.stain);
+    return new THREE.MeshPhysicalMaterial({
+      color, map: P.map,
+      normalMap: P.normalMap, normalScale: new THREE.Vector2(st.normal, st.normal),
+      roughness: st.roughness, roughnessMap: P.roughnessMap, metalness: 0,
+      clearcoat: st.clearcoat || 0, clearcoatRoughness: st.ccRough ?? 0.1,
+      envMapIntensity: st.envIntensity || 1,
+    });
+  }
+  if (st.glass) {
+    // Verre / résine translucide : la lumière traverse le dé et se teinte avec l'épaisseur
+    const base = new THREE.Color(colOf(type, d).color), white = new THREE.Color('#ffffff');
+    const m = new THREE.MeshPhysicalMaterial({
+      color: base.clone().lerp(white, st.whiten),
+      transmission: st.transmission, thickness: st.thickness, ior: 1.5,
+      attenuationColor: base, attenuationDistance: st.attDist,
+      roughness: st.roughness, metalness: 0,
+      clearcoat: 1, clearcoatRoughness: 0.03, specularIntensity: 1,
+    });
+    if (st.sparkle) {
+      // Paillettes réfléchissantes sous un vernis lisse : elles s'allument selon l'angle
+      const P = patternMaps(st.pattern);
+      Object.assign(m, {
+        normalMap: P.normalMap, normalScale: new THREE.Vector2(1, 1),
+        roughness: 1, roughnessMap: P.data, metalness: 1, metalnessMap: P.data,
+        transmissionMap: P.data,
+        emissive: base.clone().lerp(white, 0.5), emissiveMap: P.map, emissiveIntensity: 0.35,
+      });
+    }
+    return m;
+  }
+  const color = bodyColor(type, d);
+  const P = st.pattern ? patternMaps(st.pattern) : null;
+  return new THREE.MeshPhysicalMaterial({
+    color, map: P ? P.map : null,
+    bumpMap: P && st.bump ? P.data : null, bumpScale: st.bump || 0,
+    roughness: P ? 1 : st.roughness, roughnessMap: P ? P.data : null,
+    metalness: P ? 1 : (st.metalness || 0), metalnessMap: P ? P.data : null,
+    clearcoat: st.clearcoat || 0, clearcoatRoughness: st.ccRough ?? 0.12,
+    // métal brossé : les stries suivent u, le reflet s'étire en travers (le long de la bitangente)
+    anisotropy: st.anisotropy || 0, anisotropyRotation: Math.PI / 2,
+    envMapIntensity: st.envIntensity || 1,
+  });
 }
 
 /* ---------- Gabarits (géométrie + physique), mis en cache par type ---------- */
+// Taille des chiffres (hauteur / rayon inscrit de la partie plane de la face) et décalage vers le « haut »
+const LABEL_FIT = {
+  d4:   { h: 0.62, off: 0.5 },
+  d6:   { h: 1.0,  off: 0 },
+  d8:   { h: 0.98, off: -0.04 },
+  d10:  { h: 1.12, off: 0.15 },
+  d12:  { h: 0.78, off: 0 },
+  d20:  { h: 0.84, off: -0.04 },
+  d100: { h: 0.62, off: 0 },
+};
 const templates = {};
 function templateFor(type) {
   if (templates[type]) return templates[type];
   const { verts, faces } = shapeFor(type);
-  const labels = faceLabels(type, faces);
+  // d4 : la valeur est portée par chaque sommet (lu sur le sommet du haut)
+  const vertexValues = type === 'd4' ? verts.map((_, i) => ({ value: i + 1, text: String(i + 1) })) : null;
+  const labels = type === 'd4' ? null : faceLabels(type, faces);
 
-  // Géométrie de rendu (facettes planes)
-  const pos = [], nor = [];
-  for (const f of faces) {
-    for (let i = 1; i < f.ids.length - 1; i++) {
-      for (const id of [f.ids[0], f.ids[i], f.ids[i + 1]]) {
-        pos.push(...verts[id].toArray()); nor.push(...f.normal.toArray());
-      }
+  // --- Géométrie de rendu : vrai congé arrondi (somme de Minkowski polyèdre rentré + sphère) ---
+  // Chaque plan de face recule de r ; le dé = polyèdre intérieur gonflé de r. Faces planes au même
+  // endroit que la physique, arêtes en quart de cylindre (seg segments), coins en morceau de sphère.
+  const r = TYPES[type].fillet * TYPES[type].radius, N = TYPES[type].seg;
+  const incident = verts.map((_, id) => faces.map((_, fi) => fi).filter(fi => faces[fi].ids.includes(id)));
+  const inner = verts.map((v, id) => {
+    // intersection (moindres carrés) des plans rentrés des faces qui se touchent en ce sommet
+    const A = new THREE.Matrix3().set(0, 0, 0, 0, 0, 0, 0, 0, 0), b = new THREE.Vector3();
+    for (const fi of incident[id]) {
+      const n = faces[fi].normal, d = n.dot(faces[fi].center) - r;
+      const e = A.elements;
+      for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) e[j * 3 + i] += n.getComponent(i) * n.getComponent(j);
+      b.addScaledVector(n, d);
+    }
+    return b.applyMatrix3(A.invert());
+  });
+  const surf = (id, n) => inner[id].clone().addScaledVector(n, r);
+
+  const frac = x => x - Math.floor(x);
+  const faceUV = faces.map((f, fi) => {
+    // chaque face « découpe » un morceau différent de la matière
+    const u = verts[f.ids[0]].clone().sub(f.center).normalize();
+    return {
+      u, w: new THREE.Vector3().crossVectors(f.normal, u),
+      ou: 0.4 + 0.2 * frac(Math.sin(fi * 12.9898 + 1) * 43758.5453),
+      ow: 0.4 + 0.2 * frac(Math.sin(fi * 78.233 + 2) * 43758.5453),
+    };
+  });
+  const uvOf = (fi, p) => {
+    const F = faceUV[fi], d = p.clone().sub(faces[fi].center);
+    return [F.ou + d.dot(F.u) * 0.35, F.ow + d.dot(F.w) * 0.35];   // grain à l'échelle d'un vrai dé
+  };
+
+  const pos = [], nor = [], uv = [];
+  const _e1 = new THREE.Vector3(), _e2 = new THREE.Vector3();
+  const tri = (A, Bv, C, fi) => {           // sommets = [position, normale] ; uv projetés sur la face fi
+    _e1.subVectors(Bv[0], A[0]).cross(_e2.subVectors(C[0], A[0]));
+    if (_e1.dot(A[1]) + _e1.dot(Bv[1]) + _e1.dot(C[1]) < 0) [Bv, C] = [C, Bv];   // toujours vers l'extérieur
+    for (const [p, n] of [A, Bv, C]) { pos.push(p.x, p.y, p.z); nor.push(n.x, n.y, n.z); uv.push(...uvOf(fi, p)); }
+  };
+  const slerpN = (a, b, t) => a.clone().multiplyScalar(1 - t).addScaledVector(b, t).normalize();
+
+  // faces planes
+  faces.forEach((f, fi) => {
+    const P = f.ids.map(id => [surf(id, f.normal), f.normal]);
+    for (let i = 1; i < P.length - 1; i++) tri(P[0], P[i], P[i + 1], fi);
+  });
+  // arêtes : bandes cylindriques, la matière de chaque moitié suit sa face
+  const edges = new Map();
+  faces.forEach((f, fi) => f.ids.forEach((a, k) => {
+    const b = f.ids[(k + 1) % f.ids.length], key = Math.min(a, b) + '_' + Math.max(a, b);
+    if (!edges.has(key)) edges.set(key, { a, b, fs: [] });
+    edges.get(key).fs.push(fi);
+  }));
+  for (const { a, b, fs: [F, G] } of edges.values()) {
+    for (let k = 0; k < N; k++) {
+      const n0 = slerpN(faces[F].normal, faces[G].normal, k / N), n1 = slerpN(faces[F].normal, faces[G].normal, (k + 1) / N);
+      const fi = (k + 0.5) / N < 0.5 ? F : G;
+      const A0 = [surf(a, n0), n0], B0 = [surf(b, n0), n0], A1 = [surf(a, n1), n1], B1 = [surf(b, n1), n1];
+      tri(A0, B0, B1, fi); tri(A0, B1, A1, fi);
     }
   }
+  // coins : morceau de sphère (triangles sphériques subdivisés, raccord exact avec les bandes)
+  verts.forEach((v, id) => {
+    const inc = incident[id].slice(), nV = v.clone().normalize();
+    const ref = faces[inc[0]].normal.clone().addScaledVector(nV, -faces[inc[0]].normal.dot(nV)).normalize();
+    const w2 = nV.clone().cross(ref);
+    const ang = fi => Math.atan2(faces[fi].normal.dot(w2), faces[fi].normal.dot(ref));
+    inc.sort((i, j) => ang(i) - ang(j));
+    const nc = inc.reduce((s, fi) => s.add(faces[fi].normal), new THREE.Vector3()).normalize();
+    for (let k = 0; k < inc.length; k++) {
+      const fa = inc[k], fb = inc[(k + 1) % inc.length], na = faces[fa].normal, nb = faces[fb].normal;
+      const P = (i, j) => {
+        const n = nc.clone().multiplyScalar(N - i).addScaledVector(na, i - j).addScaledVector(nb, j).normalize();
+        return [surf(id, n), n];
+      };
+      for (let i = 0; i < N; i++) for (let j = 0; j <= i; j++) {
+        const fi = (2 * j + 1 < i + 1) ? fa : fb;
+        tri(P(i, j), P(i + 1, j), P(i + 1, j + 1), fi);
+        if (j < i) tri(P(i, j), P(i + 1, j + 1), P(i, j + 1), fi);
+      }
+    }
+  });
+
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
   geo.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
 
-  // Placement des étiquettes
-  const labelInfo = faces.map((f, i) => {
-    // rayon inscrit approx. = distance mini du centre aux arêtes
+  // Placement des étiquettes, sur la partie plane de chaque face
+  const labelInfo = [], fit = LABEL_FIT[type];
+  faces.forEach((f, i) => {
+    const flat = f.ids.map(id => surf(id, f.normal));
+    const center = flat.reduce((s, p) => s.add(p), new THREE.Vector3()).divideScalar(flat.length);
+    // rayon inscrit approx. = distance mini du centre aux arêtes de la partie plane
     let inr = Infinity;
-    for (let k = 0; k < f.ids.length; k++) {
-      const a = verts[f.ids[k]], b = verts[f.ids[(k + 1) % f.ids.length]];
-      const ab = b.clone().sub(a), t = THREE.MathUtils.clamp(f.center.clone().sub(a).dot(ab) / ab.lengthSq(), 0, 1);
-      inr = Math.min(inr, a.clone().addScaledVector(ab, t).distanceTo(f.center));
+    for (let k = 0; k < flat.length; k++) {
+      const a = flat[k], b = flat[(k + 1) % flat.length];
+      const ab = b.clone().sub(a), t = THREE.MathUtils.clamp(center.clone().sub(a).dot(ab) / ab.lengthSq(), 0, 1);
+      inr = Math.min(inr, a.clone().addScaledVector(ab, t).distanceTo(center));
+    }
+    const size = fit.h * inr / LABEL_DIGIT;
+    if (type === 'd4') {
+      // un chiffre près de chaque coin, le haut tourné vers ce coin (lu sur le sommet du haut)
+      f.ids.forEach((id, k) => {
+        const dir = flat[k].clone().sub(center);
+        labelInfo.push({ ...vertexValues[id], fi: i, normal: f.normal, up: dir.clone().normalize(),
+          center: center.clone().addScaledVector(dir, fit.off), size });
+      });
+      return;
     }
     let up;
     if (type === 'd6') up = verts[f.ids[0]].clone().add(verts[f.ids[1]]).multiplyScalar(.5).sub(f.center);
+    else if (type === 'd100') {
+      // chiffres orientés vers le « pôle » du dé, comme sur un vrai d100
+      const pole = Math.abs(f.normal.y) > 0.95 ? new THREE.Vector3(0, 0, -1) : new THREE.Vector3(0, 1, 0);
+      up = pole.addScaledVector(f.normal, -pole.dot(f.normal));
+    }
     else {
+      // haut du chiffre vers le sommet le plus éloigné (pointe du d10, sommet des triangles et pentagones)
       let far = f.ids[0], best = -1;
       for (const id of f.ids) { const d = verts[id].distanceTo(f.center); if (d > best + 1e-6) { best = d; far = id; } }
       up = verts[far].clone().sub(f.center);
     }
     up.normalize();
-    const scale = { d6: 1.8, d8: 1.5, d10: 1.45, d12: 1.4, d20: 1.35, d100: 1.6 }[type];
-    return { ...labels[i], normal: f.normal, center: f.center, up, size: 2 * inr * scale };
+    labelInfo.push({ ...labels[i], fi: i, normal: f.normal, center: center.addScaledVector(up, fit.off * inr), up, size });
   });
+  // Plan de chaque chiffre : uv = forme du chiffre, uv1 = même matière que la face en dessous
+  for (const L of labelInfo) {
+    const g = new THREE.PlaneGeometry(L.size, L.size);
+    const X = new THREE.Vector3().crossVectors(L.up, L.normal);
+    const pa = g.attributes.position, uv1 = [];
+    for (let k = 0; k < pa.count; k++) {
+      const p = L.center.clone().addScaledVector(X, pa.getX(k)).addScaledVector(L.up, pa.getY(k));
+      uv1.push(...uvOf(L.fi, p));
+    }
+    g.setAttribute('uv1', new THREE.Float32BufferAttribute(uv1, 2));
+    L.geo = g;
+  }
+  // Ce qui sert à lire le résultat : normale de face, ou direction du sommet pour le d4
+  const readInfo = type === 'd4'
+    ? verts.map((v, i) => ({ ...vertexValues[i], normal: v.clone().normalize() }))
+    : labelInfo;
 
+  // Physique : polyèdre exact (mêmes plans de face que le rendu)
   const shape = new CANNON.ConvexPolyhedron({
     vertices: verts.map(v => new CANNON.Vec3(v.x, v.y, v.z)),
     faces: faces.map(f => f.ids),
   });
 
-  return (templates[type] = { geo, labelInfo, shape });
+  // d100 : 100 faces contre 100 faces coûte trop cher en collisions ; on le fait rouler comme
+  // une sphère inscrite (ses facettes sont toutes tangentes à cette sphère), puis on le fait
+  // basculer sur la facette la plus proche quand il ralentit (voir settleFacet).
+  let collider = null;
+  if (type === 'd100') collider = new CANNON.Sphere(Math.min(...faces.map(f => f.normal.dot(f.center))));
+
+  return (templates[type] = { geo, labelInfo, readInfo, shape, collider });
 }
 
 /* =========================================================
    Scène 3D
    ========================================================= */
 const canvas = document.getElementById('scene');
-const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
-renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+const IS_MOBILE = matchMedia('(pointer: coarse)').matches || Math.min(screen.width, screen.height) < 600;
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, IS_MOBILE ? 1.75 : 2));
 renderer.shadowMap.enabled = true;
-renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+renderer.shadowMap.type = THREE.PCFShadowMap;   // PCF + shadow.radius : pénombre plus large que PCFSoft
 renderer.outputColorSpace = THREE.SRGBColorSpace;
+
+// Tone mapping « Khronos PBR Neutral » (pas encore dans three r160) branché comme CustomToneMapping :
+// garde la teinte et la saturation des couleurs choisies, ne compresse que les hautes lumières (reflets).
+THREE.ShaderChunk.tonemapping_pars_fragment = THREE.ShaderChunk.tonemapping_pars_fragment.replace(
+  'vec3 CustomToneMapping( vec3 color ) { return color; }',
+  `vec3 CustomToneMapping( vec3 color ) {
+    const float startCompression = 0.76;
+    const float desaturation = 0.15;
+    color *= toneMappingExposure;
+    float x = min( color.r, min( color.g, color.b ) );
+    float offset = x < 0.08 ? x - 6.25 * x * x : 0.04;
+    color -= offset;
+    float peak = max( color.r, max( color.g, color.b ) );
+    if ( peak < startCompression ) return color;
+    float d = 1.0 - startCompression;
+    float newPeak = 1.0 - d * d / ( peak + d - startCompression );
+    color *= newPeak / peak;
+    float g = 1.0 - 1.0 / ( desaturation * ( peak - newPeak ) + 1.0 );
+    return mix( color, vec3( newPeak ), g );
+  }`
+);
+renderer.toneMapping = THREE.CustomToneMapping;
+renderer.toneMappingExposure = 1.0;
 
 const scene = new THREE.Scene();
 scene.background = new THREE.Color('#0f3d24');
-const camera = new THREE.PerspectiveCamera(38, 1, 0.1, 200);
+const camera = new THREE.PerspectiveCamera(32, 1, 0.5, 120);
 
-scene.add(new THREE.HemisphereLight('#ffffff', '#14532d', 1.0));
-const sun = new THREE.DirectionalLight('#ffffff', 1.7);
-sun.position.set(-6, 18, 8);
+/* ---------- Surfaces de table ---------- */
+const SURFACES = {
+  vert: { name: 'Feutre vert', tex: 'felt', color: '#1d5c3a', bg: '#0c2b1a', swatch: '#2e7a4e', rough: 1, bump: 0.8 },
+  gris: { name: 'Feutre gris', tex: 'felt', color: '#4a4d52', bg: '#1b1c1f', swatch: '#6b6f75', rough: 1, bump: 0.8 },
+  bois: { name: 'Bois', tex: 'wood', color: '#eee4d8', bg: '#2a170c', swatch: '#9a6a3e', rough: 0.55, bump: 0.6 },
+};
+let surfaceKey = 'vert';
+try { const v = localStorage.getItem('dice-surface'); if (SURFACES[v]) surfaceKey = v; } catch (_) {}
+const surfaceTex = {};
+
+// Pièce « studio » : grande boîte à lumière au plafond, fenêtre à croisillons à gauche, panneau
+// d'appoint à droite, quelques meubles sombres et le reflet de la table au sol → carte d'environnement.
+const pmrem = new THREE.PMREMGenerator(renderer);
+let envRT = null;
+function buildEnvironment(tableColor) {
+  const env = new THREE.Scene();
+  const basic = (c, k = 1) => new THREE.MeshBasicMaterial({ color: new THREE.Color(c).multiplyScalar(k), side: THREE.DoubleSide });
+  env.add(new THREE.Mesh(new THREE.BoxGeometry(26, 14, 26), new THREE.MeshBasicMaterial({ color: new THREE.Color('#a39d94').multiplyScalar(0.32), side: THREE.BackSide })));
+  const panel = (w, h, pos, mat, look = [0, 0, 0]) => {
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(w, h), mat);
+    m.position.set(...pos); m.lookAt(...look); env.add(m); return m;
+  };
+  panel(26, 26, [0, -6.9, 0], basic(tableColor, 0.55), [0, 0, 0]);               // table
+  panel(10, 7, [1, 6.9, -1], basic('#fff8ef', 3.2), [1, 0, -1]);                // softbox plafond
+  for (const [y, z] of [[1.2, -2.6], [1.2, 1.0], [4.9, -2.6], [4.9, 1.0]])       // fenêtre 2×2 carreaux
+    panel(3.4, 3.4, [-12.9, y, z], basic('#e6efff', 4.5), [0, y, z]);
+  panel(2.2, 7, [12.9, 2, 3], basic('#fff1dc', 1.6), [0, 2, 3]);                // appoint chaud
+  panel(14, 1.6, [0, 4, -12.9], basic('#ffffff', 1.1), [0, 4, 0]);              // bandeau du fond
+  const dark = basic('#1a1714', 1);
+  for (const [w, h, d, x, z] of [[6, 5, 2, 6, -11.5], [3, 8, 3, -9, 10], [8, 3, 3, 4, 11]]) {
+    const b = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), dark);
+    b.position.set(x, -7 + h / 2, z); env.add(b);
+  }
+  if (envRT) envRT.dispose();
+  envRT = pmrem.fromScene(env, 0.02, 0.1, 60);
+  scene.environment = envRT.texture;
+  env.traverse(o => { if (o.isMesh) { o.geometry.dispose(); o.material.dispose(); } });
+}
+
+// Lumière principale = soleil de la fenêtre (même côté que dans la carte d'environnement)
+const hemi = new THREE.HemisphereLight('#fff6ea', '#1d5c3a', 0.15);
+scene.add(hemi);
+const sun = new THREE.DirectionalLight('#fff4e6', 3.0);
+sun.position.set(-9, 17, 5);
 sun.castShadow = true;
-sun.shadow.mapSize.set(2048, 2048);
-sun.shadow.bias = -0.0005;
-scene.add(sun);
+sun.shadow.mapSize.set(IS_MOBILE ? 1024 : 2048, IS_MOBILE ? 1024 : 2048);
+sun.shadow.radius = IS_MOBILE ? 3 : 5;
+sun.shadow.bias = -0.0004;
+sun.shadow.normalBias = 0.02;
+scene.add(sun, sun.target);
 
 const floorMesh = new THREE.Mesh(
   new THREE.PlaneGeometry(200, 200),
-  new THREE.MeshStandardMaterial({ color: '#1f7a44', map: makeFeltTexture(), roughness: 1 })
+  new THREE.MeshStandardMaterial({ color: '#1d5c3a', roughness: 1, metalness: 0, envMapIntensity: 0.55 })
 );
 floorMesh.rotation.x = -Math.PI / 2;
 floorMesh.receiveShadow = true;
 scene.add(floorMesh);
 
+function setSurface(k) {
+  if (!SURFACES[k]) return;
+  surfaceKey = k;
+  const S = SURFACES[k], m = floorMesh.material;
+  const t = surfaceTex[S.tex] || (surfaceTex[S.tex] = S.tex === 'wood' ? makeWoodTexture() : makeFeltTexture());
+  m.map = t.map; m.bumpMap = t.bump; m.bumpScale = S.bump; m.roughnessMap = t.rough || null;
+  m.color.set(S.color); m.roughness = S.rough;
+  m.needsUpdate = true;
+  const avg = new THREE.Color(S.color).multiply(t.avg);
+  hemi.groundColor.copy(avg);
+  scene.background = new THREE.Color(S.bg);
+  document.documentElement.style.setProperty('--felt-dark', S.bg);
+  const meta = document.querySelector('meta[name="theme-color"]'); if (meta) meta.content = S.bg;
+  buildEnvironment(avg);
+  const b = document.getElementById('surfaceBtn');
+  if (b) { b.title = 'Surface : ' + S.name; b.style.setProperty('--sw', S.swatch); }
+  try { localStorage.setItem('dice-surface', k); } catch (_) {}
+}
+
+// Ombre de contact : tache sombre et floue juste sous chaque dé (là où la lumière ambiante ne passe pas)
+const contactTex = (() => {
+  const c = document.createElement('canvas'); c.width = c.height = 128;
+  const g = c.getContext('2d'), gr = g.createRadialGradient(64, 64, 0, 64, 64, 64);
+  gr.addColorStop(0, 'rgba(0,0,0,1)'); gr.addColorStop(0.35, 'rgba(0,0,0,0.75)');
+  gr.addColorStop(0.7, 'rgba(0,0,0,0.22)'); gr.addColorStop(1, 'rgba(0,0,0,0)');
+  g.fillStyle = gr; g.fillRect(0, 0, 128, 128);
+  return new THREE.CanvasTexture(c);
+})();
+const contactGeo = new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2);
+const contactShadows = new Map();
+function updateContactShadows() {
+  for (const [d, m] of contactShadows) if (!dice.includes(d)) { scene.remove(m); m.material.dispose(); contactShadows.delete(d); }
+  for (const d of dice) {
+    let m = contactShadows.get(d);
+    if (!m) {
+      const g = d.mesh.geometry;
+      if (!g.boundingSphere) g.computeBoundingSphere();
+      m = new THREE.Mesh(contactGeo, new THREE.MeshBasicMaterial({ map: contactTex, transparent: true, depthWrite: false, color: '#000', toneMapped: false }));
+      m.userData.r = g.boundingSphere.radius;
+      m.renderOrder = -1;
+      contactShadows.set(d, m); scene.add(m);
+    }
+    const p = d.mesh.position, r = m.userData.r;
+    const lift = Math.max(0, p.y - r * 0.75);
+    m.position.set(p.x, 0.004, p.z);
+    m.scale.setScalar(r * (1.7 + lift * 0.6));
+    m.material.opacity = 0.55 * Math.max(0, 1 - lift / (r * 2.5));
+    m.visible = m.material.opacity > 0.01;
+  }
+}
+
 /* ---------- Physique ---------- */
-const world = new CANNON.World({ gravity: new CANNON.Vec3(0, -40, 0) });
+// Échelle : 1 unité ≈ 1,6 cm (un d6 fait ~1 unité d'arête). La gravité réelle serait ~600 u/s² ;
+// on garde un peu moins (≈ un tiers) pour que l'œil suive le lancer, sans effet « lune ».
+const GRAVITY = 160;
+const STEP = 1 / 180;                                   // pas fin : chocs nets, pas de traversée
+const world = new CANNON.World({ gravity: new CANNON.Vec3(0, -GRAVITY, 0) });
 world.allowSleep = true;
 world.broadphase = new CANNON.SAPBroadphase(world);
+world.solver.iterations = 14;
+world.defaultContactMaterial.contactEquationRelaxation = 3;
 
 const diceMat = new CANNON.Material('dice');
-const tableMat = new CANNON.Material('table');
-world.addContactMaterial(new CANNON.ContactMaterial(diceMat, tableMat, { friction: 0.35, restitution: 0.3 }));
-world.addContactMaterial(new CANNON.ContactMaterial(diceMat, diceMat, { friction: 0.2, restitution: 0.35 }));
+const tableMat = new CANNON.Material('table');   // tapis de feutre : amortit, accroche
+const wallMat = new CANNON.Material('wall');     // bord de piste : plus dur, glissant
+world.addContactMaterial(new CANNON.ContactMaterial(diceMat, tableMat, {
+  friction: 0.4, restitution: 0.35, contactEquationStiffness: 5e6, contactEquationRelaxation: 3,
+  frictionEquationStiffness: 5e6, frictionEquationRelaxation: 3 }));
+world.addContactMaterial(new CANNON.ContactMaterial(diceMat, wallMat, { friction: 0.15, restitution: 0.45 }));
+world.addContactMaterial(new CANNON.ContactMaterial(diceMat, diceMat, { friction: 0.12, restitution: 0.5 }));
 
-function addPlane(euler) {
-  const b = new CANNON.Body({ mass: 0, shape: new CANNON.Plane(), material: tableMat });
+function addPlane(euler, material = wallMat) {
+  const b = new CANNON.Body({ mass: 0, shape: new CANNON.Plane(), material });
   b.quaternion.setFromEuler(...euler);
   world.addBody(b);
   return b;
 }
-addPlane([-Math.PI / 2, 0, 0]);                         // sol
+const floorBody = addPlane([-Math.PI / 2, 0, 0], tableMat);   // sol
 const wallLeft  = addPlane([0, Math.PI / 2, 0]);
 const wallRight = addPlane([0, -Math.PI / 2, 0]);
 const wallBack  = addPlane([0, 0, 0]);
 const wallFront = addPlane([0, Math.PI, 0]);
 addPlane([Math.PI / 2, 0, 0]).position.y = 14;          // plafond
+
+// Résistance au roulement du feutre : un dé posé sur le tapis perd sa rotation
+// (frottement « constant » + petite part visqueuse). En l'air, presque aucun freinage.
+// Les formes rondes (d20, d12) roulent plus longtemps qu'un cube.
+const ROLL_DRAG = { d4: [7, 1.0], d6: [5, 0.8], d8: [4, 0.8], d10: [3.5, 0.8], d100: [3.5, 0.8], d12: [2, 0.6], d20: [1.2, 0.4] };
+world.addEventListener('postStep', () => {
+  for (const c of world.contacts) {
+    const d = c.bi === floorBody ? c.bj.die : c.bj === floorBody ? c.bi.die : null;
+    if (d) { d.onFloor = true; d.lastFloor = simTime; }
+  }
+  for (const d of dice) {
+    if (!d.onFloor) continue;
+    d.onFloor = false;
+    const w = d.body.angularVelocity, [k, visc] = ROLL_DRAG[d.type];
+    const s = w.length();
+    if (s < 1e-6) continue;
+    const ns = Math.max(0, s * (1 - visc * STEP) - k * STEP);
+    w.scale(ns / s, w);
+  }
+});
 
 const arena = { xMin: -4, xMax: 4, zMin: -4, zMax: 4 };
 
@@ -365,46 +1232,67 @@ const dice = [];   // { type, mesh, body, labelInfo, value, rolling, rollStart }
 function createDie(type) {
   const tpl = templateFor(type);
   const conf = TYPES[type];
-  const mesh = new THREE.Mesh(tpl.geo, new THREE.MeshStandardMaterial({ color: conf.color, roughness: 0.35, flatShading: true }));
+  const mesh = new THREE.Mesh(tpl.geo, dieMaterial(type));
   mesh.castShadow = true;
 
-  const pips = type === 'd6';
   const q = new THREE.Quaternion(), m = new THREE.Matrix4();
   for (const L of tpl.labelInfo) {
-    const plane = new THREE.Mesh(
-      new THREE.PlaneGeometry(L.size, L.size),
-      new THREE.MeshStandardMaterial({
-        map: labelTexture(L.text, conf.ink, pips), transparent: true, roughness: 0.4,
-        polygonOffset: true, polygonOffsetFactor: -2, depthWrite: false,
-      })
-    );
+    const plane = new THREE.Mesh(L.geo, labelMaterial(type, L.text));
     const x = new THREE.Vector3().crossVectors(L.up, L.normal);
     m.makeBasis(x, L.up, L.normal);
     q.setFromRotationMatrix(m);
     plane.quaternion.copy(q);
     plane.position.copy(L.center).addScaledVector(L.normal, 0.003);
+    plane.userData.text = L.text;
     mesh.add(plane);
   }
   scene.add(mesh);
 
+  const mp = massProps(type, tpl.shape);
   const body = new CANNON.Body({
-    mass: 1, material: diceMat, shape: tpl.shape,
-    sleepSpeedLimit: 0.15, sleepTimeLimit: 0.3,
-    linearDamping: 0.1, angularDamping: 0.12,
+    mass: mp.mass, material: diceMat, shape: tpl.collider || tpl.shape,
+    allowSleep: false,   // l'arrêt est détecté par la page (dé à plat et immobile)
+    linearDamping: 0.01, angularDamping: 0.02,   // air : quasi rien, le tapis freine (ROLL_DRAG)
   });
+  // Inertie d'un solide plein (et non celle de sa boîte englobante, trop forte pour un d20)
+  body.inertia.copy(mp.inertia);
+  body.invInertia.set(1 / mp.inertia.x, 1 / mp.inertia.y, 1 / mp.inertia.z);
+  body.updateInertiaWorld(true);
   world.addBody(body);
-  const die = { type, mesh, body, labelInfo: tpl.labelInfo, value: null, text: '', rolling: false, rollStart: 0 };
+  const die = { type, mesh, body, labelInfo: tpl.readInfo, value: null, text: '', rolling: false, rollStart: 0 };
   mesh.userData.die = die;
-  body.addEventListener('collide', e => {
-    const v = Math.abs(e.contact.getImpactVelocityAlongNormal());
-    if (v > 2) clack(v);
-  });
+  body.die = die;
+  body.addEventListener('collide', e => onDieCollide(die, e));
   return die;
+}
+
+// Masse ∝ volume (résine : un d6 de 16 mm ≈ 1) et tenseur d'inertie exact du polyèdre plein
+const massCache = {};
+function massProps(type, shape) {
+  if (massCache[type]) return massCache[type];
+  let V = 0, xx = 0, yy = 0, zz = 0;
+  const P = shape.vertices;
+  for (const f of shape.faces) {
+    for (let k = 1; k + 1 < f.length; k++) {
+      const a = P[f[0]], b = P[f[k]], c = P[f[k + 1]];
+      const v = a.dot(b.cross(c)) / 6;                    // tétraèdre (origine, a, b, c)
+      const m2 = (p, q, r) => (p * p + q * q + r * r + p * q + p * r + q * r) / 10;
+      V += v; xx += v * m2(a.x, b.x, c.x); yy += v * m2(a.y, b.y, c.y); zz += v * m2(a.z, b.z, c.z);
+    }
+  }
+  const s = Math.sign(V) || 1;
+  V *= s; xx *= s; yy *= s; zz *= s;
+  const D6_VOLUME = Math.pow(2 * TYPES.d6.radius / Math.sqrt(3), 3);
+  const rho = 1 / D6_VOLUME;
+  return (massCache[type] = {
+    mass: rho * V,
+    inertia: new CANNON.Vec3(rho * (yy + zz), rho * (xx + zz), rho * (xx + yy)),
+  });
 }
 
 function removeDie(d) {
   scene.remove(d.mesh);
-  d.mesh.children.forEach(c => { c.geometry.dispose(); c.material.dispose(); });
+  d.mesh.children.forEach(c => c.material.dispose());   // géométries partagées par type
   d.mesh.material.dispose();
   world.removeBody(d.body);
   dice.splice(dice.indexOf(d), 1);
@@ -422,28 +1310,137 @@ function syncDice() {
 
 function rand(a, b) { return a + Math.random() * (b - a); }
 
-function rollDie(d, strength = 1) {
-  const b = d.body;
-  b.wakeUp();
+// Un lancer = un geste : la main part d'un bord de la piste (bas de l'écran, ou un côté),
+// lâche les dés groupés, à faible hauteur, vers le bord opposé, avec un roulé vers l'avant.
+// opts.from : 'front' | 'left' | 'right' (sinon choisi selon la forme de la piste) ;
+// opts.hand : point de départ imposé (dé repris là où il est).
+function makeThrow(list, strength = 1, opts = {}) {
+  const W = arena.xMax - arena.xMin, Dz = arena.zMax - arena.zMin;
   const cx = (arena.xMin + arena.xMax) / 2, cz = (arena.zMin + arena.zMax) / 2;
-  const mx = Math.max(0.5, (arena.xMax - arena.xMin) / 2 - 1.2), mz = Math.max(0.5, (arena.zMax - arena.zMin) / 2 - 1.2);
-  b.position.set(cx + rand(-mx, mx), rand(3, 7), cz + rand(-mz, mz));
-  b.quaternion.setFromEuler(rand(0, 6.28), rand(0, 6.28), rand(0, 6.28));
-  const dir = new CANNON.Vec3(cx - b.position.x + rand(-1.5, 1.5), 0, cz - b.position.z + rand(-1.5, 1.5));
-  dir.normalize();
-  const speed = rand(7, 13) * strength;
-  b.velocity.set(dir.x * speed, rand(-2, 4), dir.z * speed);
-  b.angularVelocity.set(rand(-25, 25), rand(-25, 25), rand(-25, 25));
+  let from = opts.from;
+  if (!from) {   // on lance plutôt dans la longueur de la piste
+    const r = Math.random(), pFront = W > Dz * 1.2 ? 0.15 : 0.6;
+    from = r < pFront ? 'front' : r < (1 + pFront) / 2 ? 'left' : 'right';
+  }
+  // direction du geste (vers l'intérieur) et position de la main, près du bord
+  const dir = from === 'front' ? new CANNON.Vec3(0, 0, -1) : new CANNON.Vec3(from === 'left' ? 1 : -1, 0, 0);
+  let along = Math.abs(dir.z) > 0 ? Dz : W, across = Math.abs(dir.z) > 0 ? W : Dz;
+  const maxR = Math.max(...list.map(d => TYPES[d.type].radius));
+  const inset = Math.min(along * 0.3, maxR + 0.4);
+  const hand = new CANNON.Vec3(
+    from === 'front' ? cx + rand(-0.2, 0.2) * W : from === 'left' ? arena.xMin + inset : arena.xMax - inset, 0,
+    from === 'front' ? arena.zMax - inset : cz + rand(-0.2, 0.2) * Dz);
+  if (opts.hand) {
+    hand.set(opts.hand.x, 0, opts.hand.z);
+    dir.set(cx - hand.x + rand(-1, 1), 0, cz - hand.z + rand(-1, 1));
+    if (dir.length() < 0.5) dir.set(rand(-1, 1), 0, rand(-1, 1));
+    dir.normalize();
+    along = Math.max(3, Math.min(W, Dz) * 0.7); across = 3;
+  }
+  // dérive de quelques degrés : on ne lance jamais parfaitement droit
+  const yaw = rand(-0.3, 0.3);
+  dir.set(dir.x * Math.cos(yaw) - dir.z * Math.sin(yaw), 0, dir.x * Math.sin(yaw) + dir.z * Math.cos(yaw));
+  const side = new CANNON.Vec3(-dir.z, 0, dir.x);          // perpendiculaire, dans le plan
+
+  // Dés groupés « dans la main » : petit tas sans chevauchement (sphères englobantes),
+  // qui s'élargit (puis s'élève) s'il n'y a pas la place, sans jamais sortir de la piste.
+  const placed = dice.filter(o => !list.includes(o)).map(o => ({ c: o.body.position, r: TYPES[o.type].radius * 1.02 }));
+  const free = (c, r) => placed.every(o => o.c.distanceTo(c) > o.r + r + 0.08);
+  const clampIn = (c, r) => {
+    c.x = Math.min(arena.xMax - r - 0.05, Math.max(arena.xMin + r + 0.05, c.x));
+    c.z = Math.min(arena.zMax - r - 0.05, Math.max(arena.zMin + r + 0.05, c.z));
+    return c;
+  };
+  const slots = list.map(d => {
+    const r = TYPES[d.type].radius * 1.02;
+    let p = null;
+    for (let tries = 0; tries < 300 && !p; tries++) {
+      const g = 1 + tries / 50;
+      const c = clampIn(new CANNON.Vec3(
+        hand.x + side.x * rand(-1, 1) * 1.2 * g + dir.x * rand(0, 1.5 * g),
+        r + rand(2.2, 3.4 + 1.3 * g),
+        hand.z + side.z * rand(-1, 1) * 1.2 * g + dir.z * rand(0, 1.5 * g)), r);
+      if (c.y < 10 && free(c, r)) p = c;
+    }
+    for (let tries = 0; tries < 300 && !p; tries++) {   // piste très encombrée : n'importe où
+      const c = new CANNON.Vec3(rand(arena.xMin, arena.xMax), rand(r + 0.5, 11), rand(arena.zMin, arena.zMax));
+      if (free(clampIn(c, r), r)) p = c;
+    }
+    p = p || clampIn(new CANNON.Vec3(cx, 12, cz), r);
+    placed.push({ c: p, r });
+    return p;
+  });
+  // Vitesse : de quoi traverser une bonne part de la piste et parfois toucher le bord opposé
+  const speed = THREE.MathUtils.clamp(along * 2, 12, 24) * strength * rand(0.85, 1.1);
+  // roulé vers l'avant : le point bas du dé recule (ω × (−R·y) = −v), comme en quittant les doigts
+  const spinAxis = new CANNON.Vec3(dir.z, 0, -dir.x);
+  const spin = rand(15, 30) * Math.sqrt(strength);
+  return list.map((d, i) => ({
+    pos: slots[i],
+    vel: new CANNON.Vec3(dir.x * speed * rand(0.88, 1.08) + side.x * rand(-2, 2),
+                         rand(1, 6) * strength,
+                         dir.z * speed * rand(0.88, 1.08) + side.z * rand(-2, 2)),
+    // spin commun + part propre à chaque dé (ils se choquent dans la main)
+    ang: new CANNON.Vec3(spinAxis.x * spin + rand(-8, 8), rand(-8, 8), spinAxis.z * spin + rand(-8, 8)),
+  }));
+}
+
+function startRolling(d) {
   d.value = null;
   d.rolling = true;
+  d.calm = 0; d.stuck = 0; d.nudges = 0; d.rerolls = 0;
   d.rollStart = simTime;
 }
 
-function rollAll(strength = 1) {
+function rollDie(d, strength = 1, slot) {
+  const b = d.body;
+  b.wakeUp();
+  if (!slot) d.throwStart = simTime;                        // dé lancé seul (toucher)
+  slot = slot || makeThrow([d], strength, { hand: b.position })[0];
+  b.position.copy(slot.pos);
+  b.previousPosition.copy(slot.pos);
+  b.interpolatedPosition.copy(slot.pos);
+  // orientation uniforme (méthode de Shoemake) : aucune face favorisée au départ
+  const u1 = Math.random(), u2 = Math.random() * 2 * Math.PI, u3 = Math.random() * 2 * Math.PI;
+  const s1 = Math.sqrt(1 - u1), s2 = Math.sqrt(u1);
+  b.quaternion.set(s1 * Math.sin(u2), s1 * Math.cos(u2), s2 * Math.sin(u3), s2 * Math.cos(u3));
+  b.previousQuaternion.copy(b.quaternion);
+  b.velocity.copy(slot.vel);
+  b.angularVelocity.copy(slot.ang);
+  startRolling(d);
+}
+
+/* ---------- Couleurs aléatoires (nouveau tirage à chaque lancer) ---------- */
+let randomColors = false;
+try { randomColors = localStorage.getItem('dice-random-colors') === '1'; } catch (_) {}
+const hsl = (h, s, l) => '#' + new THREE.Color().setHSL(h, s, l, THREE.SRGBColorSpace).getHexString(THREE.SRGBColorSpace);
+function randomPair() {
+  const h = Math.random(), s = 0.5 + Math.random() * 0.4, l = 0.22 + Math.random() * 0.45;
+  // chiffres : contraste assuré (clair sur foncé, foncé sur clair), parfois doré ou argenté
+  const color = hsl(h, s, l), c = new THREE.Color(color);   // composantes linéaires
+  const lum = 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b;  // luminosité perçue (un bleu pur est sombre)
+  const r = Math.random();
+  const ink = lum < 0.2
+    ? (r < 0.2 ? '#fbbf24' : r < 0.35 ? '#d1d5db' : '#ffffff')
+    : (r < 0.25 ? hsl((h + 0.5) % 1, 0.7, 0.16) : '#111827');
+  return { color, ink };
+}
+function paintDie(d) {
+  d.mesh.material.dispose(); d.mesh.material = dieMaterial(d.type, d);
+  for (const plane of d.mesh.children) plane.material.color.set(colOf(d.type, d).ink);
+}
+function recolorDie(d) {
+  d.rand = randomColors ? randomPair() : null;
+  paintDie(d);
+}
+
+function rollAll(strength = 1, opts = {}) {
   if (!dice.length) return;
   hideHint();
-  dice.forEach(d => rollDie(d, strength));
-  if (navigator.vibrate) navigator.vibrate(30);
+  if (randomColors) dice.forEach(recolorDie);
+  const slots = makeThrow(dice, strength, opts);
+  dice.forEach((d, i) => { d.throwStart = simTime; rollDie(d, strength, slots[i]); });
+  if (navigator.vibrate && navigator.userActivation?.hasBeenActive) navigator.vibrate(30);
   updateResult();
 }
 
@@ -458,25 +1455,30 @@ function readFace(d) {
   return pick;
 }
 
+// Dans quelle mesure la face lue est bien tournée vers le haut (1 = parfaitement à plat)
+function topAlignment(d) {
+  _q.copy(d.body.quaternion);
+  let best = -Infinity;
+  for (const L of d.labelInfo) best = Math.max(best, _n.copy(L.normal).applyQuaternion(_q).y);
+  return best;
+}
+
 function updateResult() {
   const el = document.getElementById('result');
   if (!dice.length) { el.textContent = 'Ajoutez des dés avec les boutons du bas'; return; }
   if (dice.some(d => d.rolling)) { el.textContent = 'Lancer en cours…'; return; }
   if (dice.some(d => d.value == null)) { el.textContent = 'Touchez un dé ou secouez le téléphone'; return; }
+  if (simTime - lastSettle <= SETTLE_DELAY) { el.textContent = 'Lancer en cours…'; resultPending = true; return; }
+  resultPending = false;
 
   const total = dice.reduce((s, d) => s + d.value, 0);
   const chips = dice.map(d => {
-    const c = TYPES[d.type];
-    const light = d.type === 'd6';
-    return `<span class="v" style="background:${c.color};color:${light ? '#111' : '#fff'}">${d.text}<small> ${d.type}</small></span>`;
+    const c = colOf(d.type, d);
+    return `<span class="v" style="background:${c.color};color:${c.ink}">${d.text}<small> ${d.type}</small></span>`;
   }).join(' ');
   let extra = '';
   // d100 + d10 = jet de pourcentage (00 + 10 → 100)
-  const p = dice.filter(d => d.type === 'd100'), t = dice.filter(d => d.type === 'd10');
-  if (p.length === 1 && t.length === 1) {
-    const pct = (p[0].value + (t[0].value % 10)) || 100;
-    extra = `<br>Pourcentage (d100 + d10) : <b class="total">${pct}</b>`;
-  }
+
   el.innerHTML = dice.length === 1
     ? `${chips} <b class="total">${total}</b>${extra}`
     : `${chips} = <b class="total">${total}</b>${extra}`;
@@ -520,10 +1522,13 @@ function resize() {
   renderer.setSize(w, h, false);
   camera.aspect = w / h;
 
+  // Vue « photo » : focale un peu longue (32°) et inclinaison ~62° au-dessus de la table
   const t = Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
-  const dist = THREE.MathUtils.clamp(5.2 / (t * Math.min(1, camera.aspect)), 11, 45);
-  camera.position.set(0, dist * 0.94, dist * 0.34);
-  camera.lookAt(0, 0, 0);
+  // portrait : cadrage ~8 % plus serré pour garder les dés (plus petits) bien lisibles
+  const halfW = camera.aspect < 1 ? 4.8 : 5.2;
+  const dist = THREE.MathUtils.clamp(halfW / (t * Math.min(1, camera.aspect)), 12, 50);
+  camera.position.set(0, dist * 0.885, dist * 0.466);
+  camera.lookAt(0, 0, 0.35);
   camera.updateProjectionMatrix();
   camera.updateMatrixWorld();
 
@@ -533,16 +1538,21 @@ function resize() {
   const bl = floorPoint(-1, botY), br = floorPoint(1, botY), tl = floorPoint(-1, topY);
   const m = 0.15;
   arena.xMin = bl.x + m; arena.xMax = br.x - m;
-  arena.zMin = tl.z + m; arena.zMax = Math.max(bl.z - m, arena.zMin + 4);
+  // +0.6 au fond : avec la vue inclinée, le haut d'un dé posé au fond déborde vers le haut de l'écran
+  arena.zMin = tl.z + m + 0.6; arena.zMax = Math.max(bl.z - m, arena.zMin + 4);
 
   wallLeft.position.set(arena.xMin, 0, 0);
   wallRight.position.set(arena.xMax, 0, 0);
   wallBack.position.set(0, 0, arena.zMin);
   wallFront.position.set(0, 0, arena.zMax);
 
-  const s = Math.max(arena.xMax - arena.xMin, arena.zMax - arena.zMin);
+  // Boîte d'ombre resserrée sur l'arène (meilleure résolution → ombres nettes au contact)
+  const s = Math.max(arena.xMax - arena.xMin, arena.zMax - arena.zMin) * 0.62 + 1.5;
+  const cx = (arena.xMin + arena.xMax) / 2, cz = (arena.zMin + arena.zMax) / 2;
+  sun.target.position.set(cx, 0, cz); sun.position.set(cx - 9, 17, cz + 5);
+  sun.target.updateMatrixWorld(); sun.updateMatrixWorld();
   const sc = sun.shadow.camera;
-  sc.left = -s; sc.right = s; sc.top = s; sc.bottom = -s; sc.near = 1; sc.far = 60;
+  sc.left = -s; sc.right = s; sc.top = s; sc.bottom = -s; sc.near = 4; sc.far = 40;
   sc.updateProjectionMatrix();
 
   dice.forEach(d => {
@@ -554,6 +1564,14 @@ function resize() {
   });
 }
 window.addEventListener('resize', resize);
+// Le bandeau du résultat peut passer sur deux lignes : on recalcule alors la zone de jeu
+if (window.ResizeObserver) {
+  let lastTop = 0;
+  new ResizeObserver(() => {
+    const hTop = document.querySelector('.top').offsetHeight;
+    if (hTop !== lastTop) { lastTop = hTop; resize(); }
+  }).observe(document.querySelector('.top'));
+}
 
 /* ---------- Clic / toucher ---------- */
 const pointer = new THREE.Vector2();
@@ -566,6 +1584,7 @@ canvas.addEventListener('pointerdown', e => {
     let o = hit.object;
     while (o && !o.userData.die) o = o.parent;
     hideHint();
+    if (randomColors) recolorDie(o.userData.die);
     rollDie(o.userData.die);
     if (navigator.vibrate) navigator.vibrate(20);
     updateResult();
@@ -575,6 +1594,104 @@ canvas.addEventListener('pointerdown', e => {
 });
 
 document.getElementById('rollBtn').addEventListener('click', () => { askMotionPermission(); rollAll(); });
+/* ---------- Couleurs personnalisées ---------- */
+const colorSheet = document.getElementById('colorSheet');
+const colorRows = document.getElementById('colorRows');
+
+function saveColors() {
+  const out = {};
+  for (const k in TYPES) out[k] = { color: TYPES[k].color, ink: TYPES[k].ink };
+  try { localStorage.setItem('dice-colors', JSON.stringify(out)); } catch (_) {}
+}
+function refreshBody(type) {
+  for (const d of dice) if (d.type === type) { d.mesh.material.dispose(); d.mesh.material = dieMaterial(type, d); }
+}
+function refreshInk(type) {
+  for (const d of dice) if (d.type === type) {
+    for (const plane of d.mesh.children) plane.material.color.set(colOf(type, d).ink);
+  }
+}
+function buildColorRows() {
+  colorRows.innerHTML = '';
+  // Ligne « Tous les dés » : applique la même couleur à tous les types d'un coup
+  const all = document.createElement('div');
+  all.className = 'crow all';
+  const first = TYPES[Object.keys(TYPES)[0]];
+  all.innerHTML = `<b>Tous</b>
+    <label>Corps <input type="color" id="body-all" value="${first.color}"></label>
+    <label>Chiffres <input type="color" id="ink-all" value="${first.ink}"></label>`;
+  const bAll = all.querySelector('#body-all'), iAll = all.querySelector('#ink-all');
+  bAll.addEventListener('input', () => {
+    for (const k in TYPES) { TYPES[k].color = bAll.value; refreshBody(k); }
+    colorRows.querySelectorAll('[id^="body-d"]').forEach(el => { el.value = bAll.value; });
+  });
+  bAll.addEventListener('change', () => { saveColors(); renderTray(); updateResult(); });
+  const applyAllInk = () => {
+    for (const k in TYPES) if (TYPES[k].ink !== iAll.value) { TYPES[k].ink = iAll.value; refreshInk(k); }
+    colorRows.querySelectorAll('[id^="ink-d"]').forEach(el => { el.value = iAll.value; });
+    saveColors(); updateResult();
+  };
+  iAll.addEventListener('change', applyAllInk);
+  iAll.addEventListener('input', applyAllInk);
+  colorRows.appendChild(all);
+  for (const type of Object.keys(TYPES)) {
+    const row = document.createElement('div');
+    row.className = 'crow';
+    row.innerHTML = `<b>${type}</b>
+      <label>Corps <input type="color" id="body-${type}" value="${TYPES[type].color}"></label>
+      <label>Chiffres <input type="color" id="ink-${type}" value="${TYPES[type].ink}"></label>`;
+    const body = row.querySelector('#body-' + type), ink = row.querySelector('#ink-' + type);
+    // corps : mise à jour en direct (peu coûteux)
+    body.addEventListener('input', () => { TYPES[type].color = body.value; refreshBody(type); });
+    body.addEventListener('change', () => { saveColors(); renderTray(); updateResult(); });
+    // chiffres : regénère les textures gravées à la validation
+    const applyInk = () => {
+      if (TYPES[type].ink === ink.value) return;
+      TYPES[type].ink = ink.value; refreshInk(type); saveColors(); updateResult();
+    };
+    ink.addEventListener('change', applyInk);
+    ink.addEventListener('blur', applyInk);
+    colorRows.appendChild(row);
+  }
+}
+const randomBox = document.getElementById('randomColors');
+document.getElementById('colorBtn').addEventListener('click', () => {
+  buildColorRows();
+  randomBox.checked = randomColors;
+  colorRows.classList.toggle('off', randomColors);
+  colorSheet.hidden = false;
+});
+randomBox.addEventListener('change', () => {
+  randomColors = randomBox.checked;
+  try { localStorage.setItem('dice-random-colors', randomColors ? '1' : '0'); } catch (_) {}
+  colorRows.classList.toggle('off', randomColors);
+  dice.forEach(recolorDie);   // tirage immédiat (ou retour aux couleurs normales)
+  updateResult();
+});
+document.getElementById('colorClose').addEventListener('click', () => { colorSheet.hidden = true; });
+document.getElementById('colorReset').addEventListener('click', () => {
+  for (const k in TYPES) {
+    const inkChanged = TYPES[k].ink !== DEFAULT_COLORS[k].ink;
+    Object.assign(TYPES[k], DEFAULT_COLORS[k]);
+    refreshBody(k);
+    if (inkChanged) refreshInk(k);
+  }
+  saveColors(); buildColorRows(); renderTray(); updateResult();
+});
+
+const styleBtn = document.getElementById('styleBtn');
+function applyStyle() {
+  styleBtn.textContent = 'Matière : ' + STYLES[styleKey].name;
+  for (const d of dice) { d.mesh.material.dispose(); d.mesh.material = dieMaterial(d.type, d); refreshLabels(d); }
+  try { localStorage.setItem('dice-style', styleKey); } catch (_) {}
+}
+styleBtn.addEventListener('click', () => {
+  const keys = Object.keys(STYLES);
+  styleKey = keys[(keys.indexOf(styleKey) + 1) % keys.length];
+  applyStyle();
+});
+applyStyle();
+
 document.getElementById('clearBtn').addEventListener('click', () => {
   Object.keys(counts).forEach(k => counts[k] = 0);
   syncDice(); updateResult();
@@ -588,15 +1705,31 @@ const shakeBtn = document.getElementById('shakeBtn');
 let motionOn = false, lastShake = 0, last = null;
 const needsPermission = typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function';
 
+// Comme un gobelet : on secoue (les dés cliquettent « dans la main »), le lancer part quand
+// on s'arrête (ou après 1,2 s). Force selon l'énergie de la secousse ; le sens du dernier
+// coup horizontal choisit le côté d'où partent les dés.
+let shakeStart = 0, shakeLastStrong = 0, shakePeak = 0, shakeEnergy = 0, shakeX = 0, lastRattle = 0;
 function onMotion(e) {
   const a = e.accelerationIncludingGravity || e.acceleration;
   if (!a || a.x == null) return;
+  const now = performance.now();
   if (last) {
-    const delta = Math.abs(a.x - last.x) + Math.abs(a.y - last.y) + Math.abs(a.z - last.z);
-    const now = performance.now();
-    if (delta > 22 && now - lastShake > 700) {
-      lastShake = now;
-      rollAll(Math.min(1.6, delta / 25));
+    const dx = a.x - last.x, dy = a.y - last.y, dz = a.z - last.z;
+    const jerk = Math.hypot(dx, dy, dz);
+    if (jerk > 14 && now - lastShake > 900) {
+      if (!shakeStart) { shakeStart = now; shakePeak = 0; shakeEnergy = 0; }
+      shakePeak = Math.max(shakePeak, jerk);
+      shakeEnergy += jerk;
+      shakeX = dx; shakeLastStrong = now;
+      if (dice.length > 1 && now - lastRattle > 90) { lastRattle = now; clack(rand(5, 12), 'dice', 1); }
+    }
+    if (shakeStart) {
+      const quiet = now - shakeLastStrong > 250;
+      if ((quiet && now - shakeStart > 120) || now - shakeStart > 1200) {
+        const strength = THREE.MathUtils.clamp(0.55 + shakePeak / 60 + shakeEnergy / 600, 0.6, 1.5);
+        shakeStart = 0; lastShake = now;
+        rollAll(strength, { from: Math.abs(shakeX) > 10 ? (shakeX > 0 ? 'left' : 'right') : 'front' });
+      }
     }
   }
   last = { x: a.x, y: a.y, z: a.z };
@@ -622,78 +1755,346 @@ if (typeof DeviceMotionEvent !== 'undefined') {
   }
 }
 
-/* ---------- Son de choc (synthétisé) ---------- */
-let audioCtx = null, lastClack = 0;
-function clack(v) {
-  const now = performance.now();
-  if (now - lastClack < 35) return;
-  lastClack = now;
+/* ---------- Son (synthétisé en Web Audio, démarre au premier geste) ---------- */
+let audioCtx = null, master = null, noiseBuf = null, rollGain = null, rollFilter = null;
+function ensureAudio() {
   try {
-    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    if (!audioCtx) {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const comp = audioCtx.createDynamicsCompressor();
+      comp.threshold.value = -14; comp.knee.value = 10; comp.ratio.value = 4;
+      master = audioCtx.createGain(); master.gain.value = 0.9;
+      master.connect(comp).connect(audioCtx.destination);
+      const sr = audioCtx.sampleRate;
+      noiseBuf = audioCtx.createBuffer(1, sr, sr);
+      const n = noiseBuf.getChannelData(0);
+      for (let i = 0; i < n.length; i++) n[i] = Math.random() * 2 - 1;
+      // Roulement sur le feutre : souffle grave continu, volume piloté par la vitesse des dés
+      const src = audioCtx.createBufferSource(); src.buffer = noiseBuf; src.loop = true;
+      rollFilter = audioCtx.createBiquadFilter(); rollFilter.type = 'lowpass'; rollFilter.frequency.value = 500; rollFilter.Q.value = 0.5;
+      rollGain = audioCtx.createGain(); rollGain.gain.value = 0;
+      src.connect(rollFilter).connect(rollGain).connect(master);
+      src.start();
+    }
     if (audioCtx.state === 'suspended') audioCtx.resume();
-    const len = 0.05;
-    const buf = audioCtx.createBuffer(1, Math.floor(audioCtx.sampleRate * len), audioCtx.sampleRate);
-    const data = buf.getChannelData(0);
-    for (let i = 0; i < data.length; i++) data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / data.length, 4);
-    const src = audioCtx.createBufferSource(); src.buffer = buf;
-    const filter = audioCtx.createBiquadFilter(); filter.type = 'bandpass';
-    filter.frequency.value = rand(1800, 3200); filter.Q.value = 1.5;
-    const gain = audioCtx.createGain(); gain.gain.value = Math.min(0.5, v / 30);
-    src.connect(filter).connect(gain).connect(audioCtx.destination);
-    src.start();
-  } catch (_) {}
+  } catch (_) { audioCtx = null; }
+}
+['pointerdown', 'keydown', 'touchend'].forEach(t => window.addEventListener(t, ensureAudio, { capture: true, passive: true }));
+
+const audioReady = () => audioCtx && audioCtx.state === 'running';
+let voices = [];   // instants des derniers chocs joués (anti-mitraillage)
+
+// Bruit bref filtré, enveloppe percussive
+function noiseHit(t, type, freq, Q, gain, decay) {
+  const src = audioCtx.createBufferSource(); src.buffer = noiseBuf;
+  const f = audioCtx.createBiquadFilter(); f.type = type; f.frequency.value = freq; f.Q.value = Q;
+  const g = audioCtx.createGain();
+  g.gain.setValueAtTime(0, t);
+  g.gain.linearRampToValueAtTime(gain, t + 0.0015);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + decay);
+  src.connect(f).connect(g).connect(master);
+  src.start(t, Math.random() * 0.8, decay + 0.02);
+}
+// Mode de résonance du dé (sinus amorti)
+function ping(t, freq, gain, decay) {
+  const o = audioCtx.createOscillator(); o.frequency.value = freq;
+  const g = audioCtx.createGain();
+  g.gain.setValueAtTime(0, t);
+  g.gain.linearRampToValueAtTime(gain, t + 0.001);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + decay);
+  o.connect(g).connect(master);
+  o.start(t); o.stop(t + decay + 0.02);
+}
+
+// Timbre selon la matière du dé : modes de résonance (Hz, pour un dé de taille 1), durée de la
+// résonance, couleur du « clic » d'attaque et poids (un dé de pierre ou de métal frappe plus fort).
+const SOUND_MATERIALS = {
+  resine: { modes: [3200, 5600],       ring: 0.035, click: [4500, 6500], clickQ: 2.5, weight: 1 },
+  marbre: { modes: [2300, 4300, 6900], ring: 0.07,  click: [3800, 5200], clickQ: 3,   weight: 1.35 },
+  granit: { modes: [2100, 3900, 6400], ring: 0.075, click: [3500, 5000], clickQ: 3,   weight: 1.45 },
+  chene:  { modes: [1350, 2500],       ring: 0.022, click: [1600, 2600], clickQ: 1.5, weight: 0.85 },
+  noyer:  { modes: [1250, 2350],       ring: 0.024, click: [1500, 2400], clickQ: 1.5, weight: 0.85 },
+  metal:  { modes: [2450, 4870, 7930], ring: 0.32,  click: [5500, 8000], clickQ: 4,   weight: 1.8 },
+  verre:  { modes: [3900, 7400, 9800], ring: 0.16,  click: [6000, 9000], clickQ: 4,   weight: 1.2 },
+  paillettes: { modes: [3300, 5800],   ring: 0.045, click: [4500, 6500], clickQ: 2.5, weight: 1 },
+};
+// Réponse du tapis : le feutre étouffe (résonance du dé coupée, aigus atténués, choc sourd),
+// la table en bois est dure (le dé sonne, petite résonance de plateau, roulement plus présent).
+const SOUND_SURFACES = {
+  felt: { damp: 0.25, bright: 0.35, thud: [350, 900], thudGain: 0.9, board: 0,   roll: 1,   rollFreq: 1 },
+  wood: { damp: 1,    bright: 1,    thud: [500, 1600], thudGain: 0.6, board: 0.5, roll: 2.2, rollFreq: 2.2 },
+};
+const soundMat = () => SOUND_MATERIALS[styleKey] || SOUND_MATERIALS.resine;
+const soundSurf = () => SOUND_SURFACES[SURFACES[surfaceKey]?.tex === 'wood' ? 'wood' : 'felt'];
+
+// Résonance propre du dé (ses modes, légèrement désaccordés à chaque choc)
+function ringDie(t, M, pitch, amp, damp) {
+  M.modes.forEach((f, k) => {
+    ping(t, f * pitch * rand(0.97, 1.03), amp * (k ? 0.5 / k : 1), M.ring * damp * rand(0.8, 1.2) / (1 + 0.4 * k));
+  });
+}
+
+// kind : 'felt' (dé / tapis), 'dice' (dé / dé), 'wall' (bord) ; v : vitesse d'impact ; size : rayon
+function clack(v, kind = 'felt', size = 1) {
+  if (!audioReady()) return;
+  const x = Math.min(1, Math.max(0, (v - 2.5) / 35));
+  if (x <= 0) return;
+  const t = audioCtx.currentTime;
+  voices = voices.filter(s => t - s < 0.05);
+  if (voices.length >= 4 || (voices.length >= 2 && x < 0.25)) return;   // trop de chocs à la fois
+  voices.push(t);
+  const M = soundMat(), S = soundSurf();
+  const amp = Math.pow(x, 1.4) * M.weight;
+  const pitch = 1 / size;                                  // petit dé = son plus aigu
+  if (kind === 'dice') {
+    // dé contre dé : les deux dés sonnent pleinement (le tapis n'amortit pas ce choc)
+    noiseHit(t, 'bandpass', rand(...M.click) * pitch, M.clickQ, 0.5 * amp, 0.012);
+    ringDie(t, M, pitch, 0.2 * amp, 1);
+  } else if (kind === 'wall') {
+    // bord de piste en bois : toc mat + résonance du dé un peu amortie
+    noiseHit(t, 'bandpass', rand(900, 1300), 3, 0.45 * amp, 0.05);
+    ringDie(t, M, pitch, 0.08 * amp, 0.6);
+  } else {
+    // dé contre le tapis : choc grave (sourd sur feutre, plus sec sur bois)…
+    noiseHit(t, 'lowpass', S.thud[0] + S.thud[1] * x, 0.8, S.thudGain * amp, 0.03 + 0.03 * x);
+    // …claquement de la matière, que le feutre étouffe
+    noiseHit(t, 'bandpass', rand(...M.click) * pitch, M.clickQ, 0.35 * S.bright * amp, 0.01);
+    ringDie(t, M, pitch, 0.12 * S.bright * amp, S.damp);
+    // table en bois : petite résonance grave du plateau
+    if (S.board) ping(t, rand(180, 240), S.board * 0.25 * amp, 0.09);
+  }
+}
+
+function onDieCollide(die, e) {
+  const other = e.body;
+  const v = Math.abs(e.contact.getImpactVelocityAlongNormal());
+  if (other.die) {
+    if (die.body.id > other.id) return;                    // un seul son par paire
+    // un dé arrêté heurté par un dé en mouvement se remet à rouler (sa valeur peut changer)
+    for (const [a, b] of [[die, other.die], [other.die, die]]) {
+      if (!a.rolling && b.rolling && v > 3) { a.body.wakeUp(); startRolling(a); updateResult(); }
+    }
+    clack(v, 'dice', (TYPES[die.type].radius + TYPES[other.die.type].radius) / 2);
+  } else {
+    clack(v, other === floorBody ? 'felt' : 'wall', TYPES[die.type].radius);
+  }
+}
+
+function updateRollingSound() {
+  if (!audioReady()) return;
+  let e = 0;
+  for (const d of dice) {
+    if (!d.rolling || !(simTime - d.lastFloor < 0.05)) continue;
+    const vel = d.body.velocity;
+    e += vel.x * vel.x + vel.z * vel.z;
+  }
+  const sp = Math.sqrt(e);
+  // roulement : feutré et grave sur le feutre, plus présent et plus clair sur la table en bois,
+  // plus clair encore pour les dés durs (pierre, métal, verre)
+  const S = soundSurf(), M = soundMat(), hard = Math.min(1.6, M.weight);
+  rollGain.gain.setTargetAtTime(Math.min(0.05 * S.roll, sp * 0.0025 * S.roll * hard), audioCtx.currentTime, 0.05);
+  rollFilter.frequency.setTargetAtTime((300 + Math.min(900, sp * 25)) * S.rollFreq * (0.8 + 0.25 * hard), audioCtx.currentTime, 0.05);
 }
 
 /* ---------- Boucle ---------- */
 let prev = performance.now();
-let simTime = 0;
+// d100 « sphérique » : en fin de course, il bascule doucement sur la facette du dessous,
+// comme le lest d'un vrai Zocchihedron, pour finir posé bien à plat.
+const _qa = new THREE.Quaternion(), _qb = new THREE.Quaternion(), _down = new THREE.Vector3(0, -1, 0), _nn = new THREE.Vector3();
+function settleFacet(d, v, w, dt) {
+  const b = d.body, rin = b.shapes[0].radius;
+  if (v > 1.5 || w > 4 || b.position.y > rin * 1.15) return;
+  _qa.set(b.quaternion.x, b.quaternion.y, b.quaternion.z, b.quaternion.w);
+  let low = null, ly = Infinity;
+  for (const L of d.labelInfo) { const y = _nn.copy(L.normal).applyQuaternion(_qa).y; if (y < ly) { ly = y; low = L; } }
+  _nn.copy(low.normal).applyQuaternion(_qa);
+  _qb.setFromUnitVectors(_nn, _down);                 // rotation qui pose cette facette à plat
+  _qb.slerp(new THREE.Quaternion(), 1 - Math.min(1, 10 * dt));
+  _qa.premultiply(_qb);
+  b.quaternion.set(_qa.x, _qa.y, _qa.z, _qa.w);
+  b.angularVelocity.scale(0.9, b.angularVelocity);
+  b.velocity.x *= 0.97; b.velocity.z *= 0.97;
+}
+
 function tick(now) {
   const dt = Math.min(0.05, (now - prev) / 1000);
   prev = now;
-  world.fixedStep(1 / 120, dt, 10);
+  world.step(STEP, dt, 12);
   simTime += dt;
 
   let changed = false;
   for (const d of dice) {
     d.mesh.position.copy(d.body.position);
     d.mesh.quaternion.copy(d.body.quaternion);
-    if (d.rolling && (d.body.sleepState === CANNON.Body.SLEEPING || simTime - d.rollStart > 8)) {
+    if (!d.rolling) {
+      // un dé déjà lu qu'un voisin a fait basculer ou glisser se remet à rouler
+      if (d.value != null && (topAlignment(d) < 0.97 || d.body.velocity.length() > 0.8 || d.body.angularVelocity.length() > 1.5)) {
+        d.body.wakeUp(); startRolling(d); changed = true;
+      }
+      continue;
+    }
+    const b = d.body, age = simTime - d.rollStart;
+    const v = b.velocity.length(), w = b.angularVelocity.length();
+    if (d.type === 'd100') settleFacet(d, v, w, dt);
+    const align = topAlignment(d);
+    // Posé sur une face et presque immobile pendant 0,15 s → arrêté
+    const slow = v < 0.6 && w < 1.2 && age > 0.3;
+    // à plat ET posé sur le tapis (pas en équilibre sur un autre dé)
+    const flat = align > 0.985 && b.position.y < TYPES[d.type].radius * 1.25;
+    d.calm = slow && flat ? d.calm + dt : 0;
+    // Coincé de travers (appuyé sur un autre dé ou un bord) : petite pichenette
+    d.stuck = slow && !flat ? d.stuck + dt : 0;
+    const late = simTime - (d.throwStart ?? d.rollStart) > 4.5;   // le lancer s'éternise
+    if (d.stuck > 0.25 && d.nudges >= (late ? 1 : 4) && (d.rerolls || 0) < 3) {
+      // toujours calé de travers : on le reprend et on le relâche juste à côté (dé « cassé »)
+      const n = (d.rerolls || 0) + 1;
+      rollDie(d, 0.45, makeThrow([d], 0.45, { hand: b.position })[0]);
+      d.rerolls = n;
+      continue;
+    }
+    if (d.stuck > 0.25) {
+      d.stuck = 0; d.nudges++;
+      b.wakeUp();
+      // on l'écarte de ce qui le cale (dé voisin ou bord), comme d'un petit coup de doigt
+      const p = b.position, push = new CANNON.Vec3(rand(-0.3, 0.3), 0, rand(-0.3, 0.3));
+      for (const o of dice) {
+        if (o === d) continue;
+        const dx = p.x - o.body.position.x, dz = p.z - o.body.position.z, dist = Math.hypot(dx, dz);
+        const reach = (TYPES[d.type].radius + TYPES[o.type].radius) * 1.15;
+        if (dist < reach) { push.x += dx / (dist + 1e-3); push.z += dz / (dist + 1e-3); }
+      }
+      const r = TYPES[d.type].radius * 1.3;
+      if (p.x - arena.xMin < r) push.x += 1; if (arena.xMax - p.x < r) push.x -= 1;
+      if (p.z - arena.zMin < r) push.z += 1; if (arena.zMax - p.z < r) push.z -= 1;
+      const n = Math.hypot(push.x, push.z) || 1, k = Math.min(2.5, 1 + 0.3 * d.nudges);
+      b.velocity.set(push.x / n * 4 * k, 7 * k, push.z / n * 4 * k);
+      b.angularVelocity.set(rand(-10, 10) * k, rand(-10, 10) * k, rand(-10, 10) * k);
+    }
+    // Filets de sécurité : un dé sorti de la piste est relancé ; au-delà de 5 s on lit
+    // dès qu'il est à plat ; 7 s après le geste, on accepte une face presque à plat ;
+    // à 10 s on lit quoi qu'il arrive (jamais observé dans les mesures).
+    const p = b.position;
+    if (p.y < -1 || p.x < arena.xMin - 1 || p.x > arena.xMax + 1 || p.z < arena.zMin - 1 || p.z > arena.zMax + 1) {
+      rollDie(d, 0.6, makeThrow([d], 0.6, { hand: new CANNON.Vec3((arena.xMin + arena.xMax) / 2, 0, (arena.zMin + arena.zMax) / 2) })[0]);
+      continue;
+    }
+    const total = simTime - (d.throwStart ?? d.rollStart);
+    if (d.calm > 0.15 || ((age > 5 || late) && flat && v < 1.5 && w < 3) || (total > 7 && align > 0.97 && v < 3 && b.position.y < TYPES[d.type].radius) || age > 9 || total > 10) {
       d.rolling = false;
+      b.velocity.setZero(); b.angularVelocity.setZero(); b.sleep();
       const L = readFace(d);
       d.value = L.value; d.text = L.text;
+      lastSettle = simTime;
       changed = true;
     }
   }
-  if (changed) updateResult();
+  updateRollingSound();
+  if (changed || (resultPending && simTime - lastSettle > SETTLE_DELAY)) updateResult();
+  updateContactShadows();
   renderer.render(scene, camera);
   requestAnimationFrame(tick);
 }
 
+/* ---------- Textures de table (procédurales, raccordables) ---------- */
+function tileNoise(S, cx, seed, cy = cx) {   // bruit de valeur périodique 0..1 (cx × cy cellules)
+  const rnd = (i, j) => { const h = Math.sin(((i % cx + cx) % cx) * 127.1 + ((j % cy + cy) % cy) * 311.7 + seed * 74.7) * 43758.5453; return h - Math.floor(h); };
+  const out = new Float32Array(S * S), kx = cx / S, ky = cy / S;
+  for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+    const fx = x * kx, fy = y * ky, i = Math.floor(fx), j = Math.floor(fy);
+    let u = fx - i, v = fy - j; u = u * u * (3 - 2 * u); v = v * v * (3 - 2 * v);
+    const a = rnd(i, j), b = rnd(i + 1, j), c = rnd(i, j + 1), d = rnd(i + 1, j + 1);
+    out[y * S + x] = a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v;
+  }
+  return out;
+}
+function canvasTex(c, repeat, srgb) {
+  const t = new THREE.CanvasTexture(c);
+  t.wrapS = t.wrapT = THREE.RepeatWrapping;
+  t.repeat.set(repeat, repeat);
+  t.anisotropy = Math.min(8, renderer.capabilities.getMaxAnisotropy());
+  if (srgb) t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+function avgColor(img) {
+  let r = 0, g = 0, b = 0; const n = img.data.length / 4;
+  for (let i = 0; i < img.data.length; i += 4) { r += img.data[i]; g += img.data[i + 1]; b += img.data[i + 2]; }
+  return new THREE.Color().setRGB(r / n / 255, g / n / 255, b / n / 255, THREE.SRGBColorSpace);
+}
+
+// Feutre : grain fin + fibres courtes entremêlées + légères marbrures (gris, teinté par material.color)
 function makeFeltTexture() {
-  const S = 256, c = document.createElement('canvas');
+  const S = 512, c = document.createElement('canvas');
   c.width = c.height = S;
   const g = c.getContext('2d');
+  const n1 = tileNoise(S, 8, 1), n2 = tileNoise(S, 32, 2);
   const img = g.createImageData(S, S);
-  for (let i = 0; i < img.data.length; i += 4) {
-    const v = 225 + Math.random() * 30;
+  for (let i = 0, p = 0; p < S * S; p++, i += 4) {
+    const v = 210 + (n1[p] - 0.5) * 8 + (n2[p] - 0.5) * 10 + (Math.random() - 0.5) * 34;
     img.data[i] = img.data[i + 1] = img.data[i + 2] = v; img.data[i + 3] = 255;
   }
   g.putImageData(img, 0, 0);
-  const tex = new THREE.CanvasTexture(c);
-  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
-  tex.repeat.set(40, 40);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  return tex;
+  g.lineCap = 'round';
+  for (let f = 0; f < 9000; f++) {
+    const x = Math.random() * S, y = Math.random() * S, a = Math.random() * Math.PI * 2, L = 3 + Math.random() * 9;
+    g.strokeStyle = Math.random() < 0.5 ? 'rgba(255,255,255,0.16)' : 'rgba(0,0,0,0.16)';
+    g.lineWidth = 0.6 + Math.random() * 0.6;
+    const dx = Math.cos(a) * L, dy = Math.sin(a) * L, bend = (Math.random() - 0.5) * L * 0.6;
+    for (const ox of [-S, 0, S]) for (const oy of [-S, 0, S]) {
+      if (x + ox + L < 0 || x + ox - L > S || y + oy + L < 0 || y + oy - L > S) continue;
+      g.beginPath(); g.moveTo(x + ox, y + oy);
+      g.quadraticCurveTo(x + ox + dx / 2 - dy / L * bend, y + oy + dy / 2 + dx / L * bend, x + ox + dx, y + oy + dy);
+      g.stroke();
+    }
+  }
+  const avg = avgColor(g.getImageData(0, 0, S, S));
+  const map = canvasTex(c, 60, true);
+  return { map, bump: map, avg };
+}
+
+// Bois : lames de chêne huilé de teinte variable, fil long et serré, joints fins
+function makeWoodTexture() {
+  const S = 1024, PL = 8, c = document.createElement('canvas');
+  c.width = c.height = S;
+  const g = c.getContext('2d');
+  const warp = tileNoise(S, 3, 3, 24), streak = tileNoise(S, 6, 4, 300), pores = tileNoise(S, 128, 6, 512);
+  const img = g.createImageData(S, S), bump = g.createImageData(S, S);
+  const plankH = S / PL, tones = [];
+  for (let k = 0; k < PL; k++) tones.push({ t: 0.82 + Math.random() * 0.26, ph: Math.random() * 50, off: Math.floor(Math.random() * S), r: 0.95 + Math.random() * 0.1 });
+  for (let y = 0; y < S; y++) {
+    const k = Math.floor(y / plankH), T = tones[k], yy = y - k * plankH;
+    const edge = Math.min(yy, plankH - 1 - yy);
+    for (let x = 0; x < S; x++) {
+      const q = y * S + (x + T.off) % S;
+      const w = yy / plankH * 14 + T.ph + warp[q] * 2.2;
+      const ring = Math.pow(0.5 + 0.5 * Math.sin(w * Math.PI * 2), 4);
+      const shade = T.t * (1 - ring * 0.16) * (0.9 + streak[q] * 0.16) * (0.96 + pores[q] * 0.06) * (edge < 1.5 ? 0.5 : 1);
+      const i = (y * S + x) * 4;
+      img.data[i] = Math.min(255, 150 * shade * T.r); img.data[i + 1] = Math.min(255, 98 * shade); img.data[i + 2] = Math.min(255, 58 * shade / T.r); img.data[i + 3] = 255;
+      const bv = edge < 1.5 ? 60 : 190 - ring * 30 + streak[q] * 30 + pores[q] * 20;
+      bump.data[i] = bump.data[i + 1] = bump.data[i + 2] = bv; bump.data[i + 3] = 255;
+    }
+  }
+  g.putImageData(img, 0, 0);
+  const avg = avgColor(img);
+  const map = canvasTex(c, 26, true);
+  const bc = document.createElement('canvas'); bc.width = bc.height = S;
+  bc.getContext('2d').putImageData(bump, 0, 0);
+  return { map, bump: canvasTex(bc, 26, false), avg };
 }
 
 /* ---------- Démarrage ---------- */
+setSurface(surfaceKey);
+document.getElementById('surfaceBtn').addEventListener('click', () => {
+  const keys = Object.keys(SURFACES);
+  setSurface(keys[(keys.indexOf(surfaceKey) + 1) % keys.length]);
+});
 syncDice();
 resize();
 rollAll();
 requestAnimationFrame(tick);
 
 // accès pour tests
-window.__dice = { dice, counts, syncDice, rollAll, camera };
+window.__dice = { arena, setSurface, setStyle: k => { styleKey = k; applyStyle(); }, dice, counts, syncDice, rollAll, camera, world, sim: () => simTime };
 </script>
 <script>
   setTimeout(function () { if (!window.__diceLoaded) document.getElementById('err').style.display = 'grid'; }, 8000);
