@@ -395,8 +395,8 @@ function createDie(type) {
 
   const body = new CANNON.Body({
     mass: 1, material: diceMat, shape: tpl.shape,
-    sleepSpeedLimit: 0.15, sleepTimeLimit: 0.3,
-    linearDamping: 0.1, angularDamping: 0.12,
+    allowSleep: false,   // l'arrêt est détecté par la page (dé à plat et immobile)
+    linearDamping: 0.1, angularDamping: { d10: 0.25, d12: 0.35, d20: 0.35, d100: 0.25 }[type] ?? 0.12,
   });
   world.addBody(body);
   const die = { type, mesh, body, labelInfo: tpl.readInfo, value: null, text: '', rolling: false, rollStart: 0 };
@@ -442,6 +442,7 @@ function rollDie(d, strength = 1) {
   b.angularVelocity.set(rand(-25, 25), rand(-25, 25), rand(-25, 25));
   d.value = null;
   d.rolling = true;
+  d.calm = 0;
   d.rollStart = simTime;
 }
 
@@ -462,6 +463,14 @@ function readFace(d) {
     if (y > best) { best = y; pick = L; }
   }
   return pick;
+}
+
+// Dans quelle mesure la face lue est bien tournée vers le haut (1 = parfaitement à plat)
+function topAlignment(d) {
+  _q.copy(d.body.quaternion);
+  let best = -Infinity;
+  for (const L of d.labelInfo) best = Math.max(best, _n.copy(L.normal).applyQuaternion(_q).y);
+  return best;
 }
 
 function updateResult() {
@@ -655,15 +664,29 @@ let simTime = 0;
 function tick(now) {
   const dt = Math.min(0.05, (now - prev) / 1000);
   prev = now;
-  world.fixedStep(1 / 120, dt, 10);
+  world.step(1 / 120, dt, 10);
   simTime += dt;
 
   let changed = false;
   for (const d of dice) {
     d.mesh.position.copy(d.body.position);
     d.mesh.quaternion.copy(d.body.quaternion);
-    if (d.rolling && (d.body.sleepState === CANNON.Body.SLEEPING || simTime - d.rollStart > 8)) {
+    if (!d.rolling) continue;
+    // Presque immobile pendant 0,3 s → on considère le dé arrêté
+    const slow = d.body.velocity.length() < 0.3 && d.body.angularVelocity.length() < 0.8 && simTime - d.rollStart > 0.4;
+    const flat = topAlignment(d) > 0.97;
+    d.calm = slow && flat ? d.calm + dt : 0;
+    // Coincé en équilibre sur une arête : petite pichenette
+    d.stuck = slow && !flat ? (d.stuck || 0) + dt : 0;
+    if (d.stuck > 0.6) {
+      d.stuck = 0;
+      d.body.wakeUp();
+      d.body.velocity.y += 2;
+      d.body.angularVelocity.set(rand(-4, 4), rand(-4, 4), rand(-4, 4));
+    }
+    if (d.calm > 0.3 || simTime - d.rollStart > 5) {
       d.rolling = false;
+      d.body.velocity.setZero(); d.body.angularVelocity.setZero(); d.body.sleep();
       const L = readFace(d);
       d.value = L.value; d.text = L.text;
       changed = true;
@@ -698,7 +721,7 @@ rollAll();
 requestAnimationFrame(tick);
 
 // accès pour tests
-window.__dice = { dice, counts, syncDice, rollAll, camera };
+window.__dice = { dice, counts, syncDice, rollAll, camera, sim: () => simTime };
 </script>
 <script>
   setTimeout(function () { if (!window.__diceLoaded) document.getElementById('err').style.display = 'grid'; }, 8000);
