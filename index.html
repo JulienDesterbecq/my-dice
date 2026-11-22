@@ -150,14 +150,17 @@ window.__diceLoaded = true;
    Types de dés
    ========================================================= */
 const MAX_DICE = 12;
+// radius = rayon circonscrit (d10 : demi-hauteur), proportions d'un set standard à 0,075 unité/mm :
+// d4 arête 22 mm, d6 arête 16 mm, d8 22 mm pointe à pointe, d10 20 mm de haut, d12 19 mm et d20 20 mm face à face.
+// fillet = rayon du congé des arêtes (fraction du rayon), seg = segments du congé.
 const TYPES = {
-  d4:   { faces: 4,  radius: 1.15, color: '#eab308', ink: '#1c1917' },
-  d6:   { faces: 6,  radius: 0.85, color: '#db2777', ink: '#ffffff' },
-  d8:   { faces: 8,  radius: 0.95, color: '#2563eb', ink: '#ffffff' },
-  d10:  { faces: 10, radius: 0.95, color: '#7c3aed', ink: '#ffffff' },
-  d12:  { faces: 12, radius: 1.00, color: '#ea580c', ink: '#ffffff' },
-  d20:  { faces: 20, radius: 1.05, color: '#dc2626', ink: '#ffffff' },
-  d100: { faces: 10, radius: 0.95, color: '#0d9488', ink: '#ffffff' },
+  d4:   { faces: 4,  radius: 1.00, fillet: 0.075, seg: 4, color: '#eab308', ink: '#1c1917' },
+  d6:   { faces: 6,  radius: 1.04, fillet: 0.13,  seg: 5, color: '#db2777', ink: '#ffffff' },
+  d8:   { faces: 8,  radius: 0.82, fillet: 0.07,  seg: 4, color: '#2563eb', ink: '#ffffff' },
+  d10:  { faces: 10, radius: 0.77, fillet: 0.065, seg: 4, color: '#7c3aed', ink: '#ffffff' },
+  d12:  { faces: 12, radius: 0.90, fillet: 0.06,  seg: 4, color: '#ea580c', ink: '#ffffff' },
+  d20:  { faces: 20, radius: 0.94, fillet: 0.045, seg: 3, color: '#dc2626', ink: '#ffffff' },
+  d100: { faces: 10, radius: 0.77, fillet: 0.065, seg: 4, color: '#0d9488', ink: '#ffffff' },
 };
 const DEFAULT_COLORS = Object.fromEntries(Object.entries(TYPES).map(([k, t]) => [k, { color: t.color, ink: t.ink }]));
 try {
@@ -178,8 +181,9 @@ function trianglesFromGeometry(geo) {
 
 function d10Triangles() {
   // Trapézoèdre pentagonal : faces en cerf-volant planes si h = a(1+cos36°)/(1−cos36°)
+  // (quel que soit le rayon de l'anneau). Un vrai d10 est un peu plus haut que large : h = 1,15 × rayon.
   const c = Math.cos(Math.PI / 5);
-  const h = 1, a = h * (1 - c) / (1 + c);
+  const h = 1.15, a = h * (1 - c) / (1 + c);
   const ring = [];
   for (let i = 0; i < 10; i++) {
     const t = i * Math.PI / 5;
@@ -240,76 +244,160 @@ function shapeFor(type) {
   }
 }
 
-// Valeurs : faces opposées appariées (somme constante, comme sur de vrais dés)
+// Valeurs : faces opposées appariées (somme constante : d6 = 7, d8 = 9, d10 = 9, d12 = 13, d20 = 21)
+// d6 : 1-2-3 dans le sens trigonométrique autour d'un sommet (dés occidentaux).
+// d10/d100 : chiffres impairs autour d'une pointe, pairs autour de l'autre.
+// d8/d12/d20 : sommes aux sommets équilibrées comme sur les dés de casino/JdR ; d20 : 20 entouré de 2, 8, 14.
+// Recherche locale à graine fixe : la disposition est toujours la même.
 function faceLabels(type, faces) {
-  const n = faces.length;
-  let list;
-  if (type === 'd10') list = [...Array(10).keys()].map(v => ({ value: v === 0 ? 10 : v, text: String(v) }));
-  else if (type === 'd100') list = [...Array(10).keys()].map(v => ({ value: v * 10, text: v === 0 ? '00' : String(v * 10) }));
-  else list = [...Array(n).keys()].map(v => ({ value: v + 1, text: String(v + 1) }));
-  if (type === 'd10') list.sort((a, b) => (a.text - b.text)); // 0..9
+  const n = faces.length, ten = type === 'd10' || type === 'd100';
+  const K = ten ? 9 : n + 1;                       // somme de deux faces opposées
+  const label = type === 'd10' ? k => ({ value: k || 10, text: String(k) })
+    : type === 'd100' ? k => ({ value: k * 10, text: k ? String(k * 10) : '00' })
+    : k => ({ value: k, text: String(k) });
+  const opp = faces.map(f => faces.findIndex(g => g.normal.dot(f.normal) < -0.99));
+  let num = new Array(n);
 
-  const out = new Array(n);
-  let j = 0;
-  for (let i = 0; i < n; i++) {
-    if (out[i]) continue;
-    const opp = faces.findIndex((f, k) => k !== i && !out[k] && f.normal.dot(faces[i].normal) < -0.99);
-    out[i] = list[j];
-    if (opp >= 0) out[opp] = list[n - 1 - j];
-    j++;
+  if (type === 'd6') {
+    const v = faces[0].ids[0];
+    const around = faces.map((_, i) => i).filter(i => faces[i].ids.includes(v));
+    const out = around.reduce((s, i) => s.add(faces[i].normal), new THREE.Vector3()).normalize();
+    const ref = faces[around[0]].normal, w = new THREE.Vector3().crossVectors(out, ref);
+    const ang = i => Math.atan2(faces[i].normal.dot(w), faces[i].normal.dot(ref));
+    around.sort((i, j) => ang(i) - ang(j));
+    around.forEach((fi, k) => { num[fi] = k + 1; num[opp[fi]] = 6 - k; });
+  } else {
+    const pairs = [];
+    faces.forEach((_, i) => { if (i < opp[i]) pairs.push([i, opp[i]]); });
+    const inc = new Map();
+    faces.forEach((f, fi) => f.ids.forEach(id => { if (!inc.has(id)) inc.set(id, []); inc.get(id).push(fi); }));
+    const corners = [...inc.values()].filter(l => !ten || l.length === 3);
+    const top = faces.map(f => f.normal.y > 0);
+    const nb = fi => faces.map((_, j) => j).filter(j => faces[j].ids.filter(id => faces[fi].ids.includes(id)).length === 2);
+    const cost = a => {
+      let c = 0;
+      for (const l of corners) { let s = -l.length * K / 2; for (const fi of l) s += a[fi]; c += s * s; }
+      if (ten) a.forEach((x, fi) => { if (top[fi] !== (x % 2 === 1)) c += 1000; });
+      if (type === 'd20') c += 1000 * (3 - nb(a.indexOf(20)).filter(j => [2, 8, 14].includes(a[j])).length);
+      return c;
+    };
+    let seed = 12345;
+    const rnd = () => (seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648;
+    let best = null, bestC = Infinity;
+    for (let restart = 0; restart < 24 && bestC > 0; restart++) {
+      const pv = pairs.map((_, k) => ten ? k : k + 1).sort(() => rnd() - 0.5), flip = pairs.map(() => rnd() < 0.5);
+      const assign = () => { const a = new Array(n); pairs.forEach(([i, j], k) => { const x = flip[k] ? K - pv[k] : pv[k]; a[i] = x; a[j] = K - x; }); return a; };
+      const move = (p, q, swap) => { if (swap) { [pv[p], pv[q]] = [pv[q], pv[p]]; [flip[p], flip[q]] = [flip[q], flip[p]]; } else flip[p] = !flip[p]; };
+      let cur = cost(assign());
+      for (let it = 0; it < 2500; it++) {
+        const p = Math.floor(rnd() * pairs.length), q = Math.floor(rnd() * pairs.length), swap = rnd() < 0.5 && p !== q;
+        move(p, q, swap);
+        const c = cost(assign());
+        if (c <= cur) cur = c; else move(p, q, swap);
+      }
+      if (cur < bestC) { bestC = cur; best = assign(); }
+    }
+    num = best;
   }
-  return out;
+  return num.map(label);
 }
 
 /* ---------- Chiffres gravés ---------- */
-// Masque (forme du chiffre), carte de normales (parois du creux, éclairées par la vraie lumière)
-// et occlusion (le fond du creux reçoit moins de lumière ambiante près des parois).
+// Police dessinée (identique sur tous les appareils, rien à charger) : chiffres bâton gras aux
+// extrémités arrondies, comme gravés à la fraise boule, proportions des dés de jeu (largeur ≈ 0,6 × hauteur).
+// Chaque glyphe est un tracé de ligne médiane dans une boîte de hauteur 1 (y vers le bas), largeur w.
+const GLYPH_STROKE = 0.19, GLYPH_GAP = 0.29;
+const glyph6 = g => {
+  g.moveTo(0.02, 0.69); g.bezierCurveTo(0.0, 0.28, 0.13, 0.0, 0.44, 0.0);
+  g.moveTo(0.5, 0.69); g.ellipse(0.25, 0.69, 0.25, 0.31, 0, 0, Math.PI * 2);
+};
+const GLYPHS = {
+  '0': [0.5, g => { g.moveTo(0, 0.27); g.arc(0.25, 0.27, 0.25, Math.PI, 0); g.lineTo(0.5, 0.73); g.arc(0.25, 0.73, 0.25, 0, Math.PI); g.closePath(); }],
+  '1': [0.3, g => { g.moveTo(0.02, 0.24); g.lineTo(0.3, 0); g.lineTo(0.3, 1); }],
+  '2': [0.5, g => { g.arc(0.25, 0.26, 0.25, Math.PI - 0.3, Math.PI * 2 + 0.5); g.lineTo(0, 1); g.lineTo(0.52, 1); }],
+  '3': [0.5, g => { g.arc(0.24, 0.235, 0.235, Math.PI + 0.35, Math.PI * 2.5); g.arc(0.25, 0.735, 0.265, -Math.PI / 2, Math.PI - 0.4); }],
+  '4': [0.52, g => { g.moveTo(0.37, 1); g.lineTo(0.37, 0); g.lineTo(0, 0.7); g.lineTo(0.52, 0.7); }],
+  '5': [0.5, g => { g.moveTo(0.47, 0); g.lineTo(0.07, 0); g.lineTo(0.25 + 0.26 * Math.cos(-2.2), 0.68 + 0.32 * Math.sin(-2.2)); g.ellipse(0.25, 0.68, 0.26, 0.32, 0, -2.2, Math.PI - 0.45); }],
+  '6': [0.5, glyph6],
+  '7': [0.5, g => { g.moveTo(0, 0); g.lineTo(0.5, 0); g.quadraticCurveTo(0.28, 0.42, 0.2, 1); }],
+  '8': [0.5, g => { g.moveTo(0.465, 0.235); g.ellipse(0.25, 0.235, 0.215, 0.235, 0, 0, Math.PI * 2); g.moveTo(0.5, 0.735); g.ellipse(0.25, 0.735, 0.25, 0.265, 0, 0, Math.PI * 2); }],
+  '9': [0.5, g => { g.translate(0.5, 1); g.rotate(Math.PI); glyph6(g); }],   // 6 retourné, comme sur les dés
+};
+// Échelle de la texture : px par unité de hauteur de glyphe (assez de marge pour « 00 » et le soulignement)
+const LABEL_S = 256, LABEL_K = 144;
+const LABEL_DIGIT = (1 + GLYPH_STROKE) * LABEL_K / LABEL_S;   // hauteur des chiffres / taille du plan
+
+// Masque (forme du chiffre) et carte de normales (parois du creux, éclairées par la vraie lumière).
+// Profil du creux : fond plat, parois raides arrondies vers le haut, calculé à partir de la distance au bord.
+// L'occlusion reste uniforme (aucune ombre peinte) : alpha (canal G) et ao (canal R) partagent une texture.
 // La couleur vient du matériau : couleur des chiffres × texture de la matière.
 const texCache = new Map();
 function labelTextures(text) {
   if (texCache.has(text)) return texCache.get(text);
-  const S = 256;
+  const S = LABEL_S, K = LABEL_K;
   const mask = document.createElement('canvas'); mask.width = mask.height = S;
   const mg = mask.getContext('2d');
-  const size = text.length > 1 ? 120 : 150;
   mg.fillStyle = '#000'; mg.fillRect(0, 0, S, S);
-  mg.fillStyle = '#fff';
-  mg.font = `800 ${size}px system-ui, -apple-system, "Segoe UI", Roboto, sans-serif`;
-  mg.textAlign = 'center'; mg.textBaseline = 'middle';
-  mg.fillText(text, S / 2, S / 2 + size * 0.04);
-  if (text === '6' || text === '9') mg.fillRect(S / 2 - 34, S / 2 + size * 0.42, 68, 12);  // repère 6/9
+  mg.strokeStyle = '#fff'; mg.lineCap = mg.lineJoin = 'round';
+  const chars = [...text];
+  const total = chars.reduce((s, c) => s + GLYPHS[c][0], 0) + GLYPH_GAP * (chars.length - 1);
+  let x = S / 2 - total * K / 2;
+  for (const c of chars) {
+    mg.setTransform(K, 0, 0, K, x, S / 2 - K / 2);
+    mg.beginPath(); GLYPHS[c][1](mg);
+    mg.setTransform(K, 0, 0, K, x, S / 2 - K / 2);
+    mg.lineWidth = GLYPH_STROKE; mg.stroke();
+    x += (GLYPHS[c][0] + GLYPH_GAP) * K;
+  }
+  if (text === '6' || text === '9') {          // repère 6/9 : soulignement
+    mg.setTransform(K, 0, 0, K, S / 2 - total * K / 2, S / 2 - K / 2);
+    mg.beginPath(); mg.moveTo(0.04, 1.29); mg.lineTo(0.46, 1.29);
+    mg.lineWidth = 0.14; mg.stroke();
+  }
+  mg.setTransform(1, 0, 0, 1, 0, 0);
 
   const px = mg.getImageData(0, 0, S, S).data;
-  const m = new Float32Array(S * S);
-  for (let i = 0; i < S * S; i++) m[i] = px[i * 4] / 255;
+  const N = S * S, m = new Float32Array(N), d = new Float32Array(N);
+  for (let i = 0; i < N; i++) { m[i] = px[i * 4] / 255; d[i] = m[i] > 0.5 ? 1e4 : 0; }
+  // distance (chanfrein 3×3) de chaque pixel du chiffre au bord
+  const D = Math.SQRT2;
+  for (let y = 1; y < S - 1; y++) for (let x = 1; x < S - 1; x++) {
+    const i = y * S + x; if (!d[i]) continue;
+    d[i] = Math.min(d[i], d[i - 1] + 1, d[i - S] + 1, d[i - S - 1] + D, d[i - S + 1] + D);
+  }
+  for (let y = S - 2; y > 0; y--) for (let x = S - 2; x > 0; x--) {
+    const i = y * S + x; if (!d[i]) continue;
+    d[i] = Math.min(d[i], d[i + 1] + 1, d[i + S] + 1, d[i + S + 1] + D, d[i + S - 1] + D);
+  }
+  // hauteur : 1 au bord, 0 au fond ; paroi sur WALL px (bord légèrement arrondi en haut)
+  const WALL = 5;
+  let h = new Float32Array(N);
+  for (let i = 0; i < N; i++) {
+    const t = Math.min(1, Math.max(0, (m[i] > 0.5 ? d[i] - 0.5 : m[i] - 0.5) / WALL));
+    h[i] = 1 - t * t * (3 - 2 * t);
+  }
+  h = boxBlur(h, S, 1);
 
-  // relief : hauteur = 1 dehors, 0 au fond du creux, parois en pente douce
-  let h = m.map(v => 1 - v);
-  for (let pass = 0; pass < 2; pass++) h = boxBlur(h, S, 2);
-  // occlusion : plus sombre près des parois
-  let o = m.slice();
-  for (let pass = 0; pass < 2; pass++) o = boxBlur(o, S, 5);
-
-  const toCanvas = fill => {
+  const toTexture = fill => {
     const c = document.createElement('canvas'); c.width = c.height = S;
     const g = c.getContext('2d'), img = g.createImageData(S, S);
     for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) fill(img.data, (y * S + x) * 4, x, y);
     g.putImageData(img, 0, 0);
-    return new THREE.CanvasTexture(c);
+    const t = new THREE.CanvasTexture(c); t.anisotropy = 4;
+    return t;
   };
+  const DEPTH = 3.2;    // pente des parois (≈ 45° avant normalScale)
   const at = (x, y) => h[Math.min(S - 1, Math.max(0, y)) * S + Math.min(S - 1, Math.max(0, x))];
-  const normalMap = toCanvas((d, i, x, y) => {
-    let nx = -(at(x + 1, y) - at(x - 1, y)) * 9, ny = (at(x, y + 1) - at(x, y - 1)) * 9, nz = 1;
-    const l = Math.hypot(nx, ny, nz);
-    d[i] = (nx / l * .5 + .5) * 255; d[i + 1] = (ny / l * .5 + .5) * 255; d[i + 2] = (nz / l * .5 + .5) * 255; d[i + 3] = 255;
+  const normalMap = toTexture((o, i, x, y) => {
+    const nx = -(at(x + 1, y) - at(x - 1, y)) * DEPTH / 2, ny = (at(x, y + 1) - at(x, y - 1)) * DEPTH / 2;
+    const l = Math.hypot(nx, ny, 1);
+    o[i] = (nx / l * .5 + .5) * 255; o[i + 1] = (ny / l * .5 + .5) * 255; o[i + 2] = (1 / l * .5 + .5) * 255; o[i + 3] = 255;
   });
-  const ao = toCanvas((d, i, x, y) => {
-    const v = 255 * Math.min(1, 0.3 + 0.75 * o[y * S + x]);
-    d[i] = d[i + 1] = d[i + 2] = v; d[i + 3] = 255;
+  const maskAo = toTexture((o, i, x, y) => {
+    const v = px[(y * S + x) * 4];
+    o[i] = 255; o[i + 1] = o[i + 2] = v; o[i + 3] = 255;     // R : ao uniforme, G : masque
   });
-  const alpha = new THREE.CanvasTexture(mask);
-  for (const t of [normalMap, ao, alpha]) t.anisotropy = 4;
-  const out = { alpha, normalMap, ao };
+  const out = { alpha: maskAo, normalMap, ao: maskAo };
   texCache.set(text, out);
   return out;
 }
@@ -456,6 +544,16 @@ function dieMaterial(type) {
 }
 
 /* ---------- Gabarits (géométrie + physique), mis en cache par type ---------- */
+// Taille des chiffres (hauteur / rayon inscrit de la partie plane de la face) et décalage vers le « haut »
+const LABEL_FIT = {
+  d4:   { h: 0.62, off: 0.5 },
+  d6:   { h: 1.0,  off: 0 },
+  d8:   { h: 0.98, off: -0.04 },
+  d10:  { h: 1.12, off: 0.15 },
+  d12:  { h: 0.78, off: 0 },
+  d20:  { h: 0.84, off: -0.04 },
+  d100: { h: 0.86, off: 0.12 },
+};
 const templates = {};
 function templateFor(type) {
   if (templates[type]) return templates[type];
@@ -464,11 +562,24 @@ function templateFor(type) {
   const vertexValues = type === 'd4' ? verts.map((_, i) => ({ value: i + 1, text: String(i + 1) })) : null;
   const labels = type === 'd4' ? null : faceLabels(type, faces);
 
-  // Géométrie de rendu (facettes planes)
-  // --- Géométrie arrondie : faces rentrées + bandes d'arête + coins ---
-  // Les normales passent en douceur d'une face à l'autre sur les bandes : l'arête paraît arrondie
-  // et accroche la lumière. La physique garde le polyèdre exact.
-  const B = 0.06 * TYPES[type].radius;
+  // --- Géométrie de rendu : vrai congé arrondi (somme de Minkowski polyèdre rentré + sphère) ---
+  // Chaque plan de face recule de r ; le dé = polyèdre intérieur gonflé de r. Faces planes au même
+  // endroit que la physique, arêtes en quart de cylindre (seg segments), coins en morceau de sphère.
+  const r = TYPES[type].fillet * TYPES[type].radius, N = TYPES[type].seg;
+  const incident = verts.map((_, id) => faces.map((_, fi) => fi).filter(fi => faces[fi].ids.includes(id)));
+  const inner = verts.map((v, id) => {
+    // intersection (moindres carrés) des plans rentrés des faces qui se touchent en ce sommet
+    const A = new THREE.Matrix3().set(0, 0, 0, 0, 0, 0, 0, 0, 0), b = new THREE.Vector3();
+    for (const fi of incident[id]) {
+      const n = faces[fi].normal, d = n.dot(faces[fi].center) - r;
+      const e = A.elements;
+      for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) e[j * 3 + i] += n.getComponent(i) * n.getComponent(j);
+      b.addScaledVector(n, d);
+    }
+    return b.applyMatrix3(A.invert());
+  });
+  const surf = (id, n) => inner[id].clone().addScaledVector(n, r);
+
   const frac = x => x - Math.floor(x);
   const faceUV = faces.map((f, fi) => {
     // chaque face « découpe » un morceau différent de la matière
@@ -483,32 +594,22 @@ function templateFor(type) {
     const F = faceUV[fi], d = p.clone().sub(faces[fi].center);
     return [F.ou + d.dot(F.u) * 0.22, F.ow + d.dot(F.w) * 0.22];
   };
-  // coin de chaque face, rentré de B vers l'intérieur de la face
-  const inset = faces.map(f => {
-    const m = new Map(), n = f.ids.length;
-    f.ids.forEach((id, k) => {
-      const v = verts[id];
-      const e1 = verts[f.ids[(k + n - 1) % n]].clone().sub(v).normalize();
-      const e2 = verts[f.ids[(k + 1) % n]].clone().sub(v).normalize();
-      const bis = e1.clone().add(e2).normalize();
-      m.set(id, v.clone().addScaledVector(bis, B / Math.sin(e1.angleTo(e2) / 2)));
-    });
-    return m;
-  });
 
   const pos = [], nor = [], uv = [];
-  const tri = (A, Bv, C) => {           // sommets = [position, normale, uv]
-    const cr = Bv[0].clone().sub(A[0]).cross(C[0].clone().sub(A[0]));
-    if (cr.dot(A[0].clone().add(Bv[0]).add(C[0])) < 0) [Bv, C] = [C, Bv];   // toujours vers l'extérieur
-    for (const [p, n, t] of [A, Bv, C]) { pos.push(p.x, p.y, p.z); nor.push(n.x, n.y, n.z); uv.push(t[0], t[1]); }
+  const _e1 = new THREE.Vector3(), _e2 = new THREE.Vector3();
+  const tri = (A, Bv, C, fi) => {           // sommets = [position, normale] ; uv projetés sur la face fi
+    _e1.subVectors(Bv[0], A[0]).cross(_e2.subVectors(C[0], A[0]));
+    if (_e1.dot(A[1]) + _e1.dot(Bv[1]) + _e1.dot(C[1]) < 0) [Bv, C] = [C, Bv];   // toujours vers l'extérieur
+    for (const [p, n] of [A, Bv, C]) { pos.push(p.x, p.y, p.z); nor.push(n.x, n.y, n.z); uv.push(...uvOf(fi, p)); }
   };
-  const V = (fi, id) => { const p = inset[fi].get(id); return [p, faces[fi].normal, uvOf(fi, p)]; };
+  const slerpN = (a, b, t) => a.clone().multiplyScalar(1 - t).addScaledVector(b, t).normalize();
 
-  // faces
+  // faces planes
   faces.forEach((f, fi) => {
-    for (let i = 1; i < f.ids.length - 1; i++) tri(V(fi, f.ids[0]), V(fi, f.ids[i]), V(fi, f.ids[i + 1]));
+    const P = f.ids.map(id => [surf(id, f.normal), f.normal]);
+    for (let i = 1; i < P.length - 1; i++) tri(P[0], P[i], P[i + 1], fi);
   });
-  // bandes d'arête
+  // arêtes : bandes cylindriques, la matière de chaque moitié suit sa face
   const edges = new Map();
   faces.forEach((f, fi) => f.ids.forEach((a, k) => {
     const b = f.ids[(k + 1) % f.ids.length], key = Math.min(a, b) + '_' + Math.max(a, b);
@@ -516,21 +617,33 @@ function templateFor(type) {
     edges.get(key).fs.push(fi);
   }));
   for (const { a, b, fs: [F, G] } of edges.values()) {
-    tri(V(F, a), V(F, b), V(G, b));
-    tri(V(F, a), V(G, b), V(G, a));
+    for (let k = 0; k < N; k++) {
+      const n0 = slerpN(faces[F].normal, faces[G].normal, k / N), n1 = slerpN(faces[F].normal, faces[G].normal, (k + 1) / N);
+      const fi = (k + 0.5) / N < 0.5 ? F : G;
+      const A0 = [surf(a, n0), n0], B0 = [surf(b, n0), n0], A1 = [surf(a, n1), n1], B1 = [surf(b, n1), n1];
+      tri(A0, B0, B1, fi); tri(A0, B1, A1, fi);
+    }
   }
-  // coins : petit éventail bombé
+  // coins : morceau de sphère (triangles sphériques subdivisés, raccord exact avec les bandes)
   verts.forEach((v, id) => {
-    const inc = faces.map((_, fi) => fi).filter(fi => faces[fi].ids.includes(id));
-    const nV = v.clone().normalize();
-    const ref = inset[inc[0]].get(id).clone().sub(v), w2 = nV.clone().cross(ref);
-    const ang = fi => { const d = inset[fi].get(id).clone().sub(v); return Math.atan2(d.dot(w2), d.dot(ref)); };
+    const inc = incident[id].slice(), nV = v.clone().normalize();
+    const ref = faces[inc[0]].normal.clone().addScaledVector(nV, -faces[inc[0]].normal.dot(nV)).normalize();
+    const w2 = nV.clone().cross(ref);
+    const ang = fi => Math.atan2(faces[fi].normal.dot(w2), faces[fi].normal.dot(ref));
     inc.sort((i, j) => ang(i) - ang(j));
-    const c = new THREE.Vector3();
-    inc.forEach(fi => c.add(inset[fi].get(id)));
-    c.divideScalar(inc.length).addScaledVector(nV, B * 0.35);
-    const C = [c, nV, uvOf(inc[0], c)];
-    for (let k = 0; k < inc.length; k++) tri(C, V(inc[k], id), V(inc[(k + 1) % inc.length], id));
+    const nc = inc.reduce((s, fi) => s.add(faces[fi].normal), new THREE.Vector3()).normalize();
+    for (let k = 0; k < inc.length; k++) {
+      const fa = inc[k], fb = inc[(k + 1) % inc.length], na = faces[fa].normal, nb = faces[fb].normal;
+      const P = (i, j) => {
+        const n = nc.clone().multiplyScalar(N - i).addScaledVector(na, i - j).addScaledVector(nb, j).normalize();
+        return [surf(id, n), n];
+      };
+      for (let i = 0; i < N; i++) for (let j = 0; j <= i; j++) {
+        const fi = (2 * j + 1 < i + 1) ? fa : fb;
+        tri(P(i, j), P(i + 1, j), P(i + 1, j + 1), fi);
+        if (j < i) tri(P(i, j), P(i + 1, j + 1), P(i, j + 1), fi);
+      }
+    }
   });
 
   const geo = new THREE.BufferGeometry();
@@ -538,35 +651,38 @@ function templateFor(type) {
   geo.setAttribute('normal', new THREE.Float32BufferAttribute(nor, 3));
   geo.setAttribute('uv', new THREE.Float32BufferAttribute(uv, 2));
 
-  // Placement des étiquettes
-  const labelInfo = [];
+  // Placement des étiquettes, sur la partie plane de chaque face
+  const labelInfo = [], fit = LABEL_FIT[type];
   faces.forEach((f, i) => {
-    // rayon inscrit approx. = distance mini du centre aux arêtes
+    const flat = f.ids.map(id => surf(id, f.normal));
+    const center = flat.reduce((s, p) => s.add(p), new THREE.Vector3()).divideScalar(flat.length);
+    // rayon inscrit approx. = distance mini du centre aux arêtes de la partie plane
     let inr = Infinity;
-    for (let k = 0; k < f.ids.length; k++) {
-      const a = verts[f.ids[k]], b = verts[f.ids[(k + 1) % f.ids.length]];
-      const ab = b.clone().sub(a), t = THREE.MathUtils.clamp(f.center.clone().sub(a).dot(ab) / ab.lengthSq(), 0, 1);
-      inr = Math.min(inr, a.clone().addScaledVector(ab, t).distanceTo(f.center));
+    for (let k = 0; k < flat.length; k++) {
+      const a = flat[k], b = flat[(k + 1) % flat.length];
+      const ab = b.clone().sub(a), t = THREE.MathUtils.clamp(center.clone().sub(a).dot(ab) / ab.lengthSq(), 0, 1);
+      inr = Math.min(inr, a.clone().addScaledVector(ab, t).distanceTo(center));
+    }
+    const size = fit.h * inr / LABEL_DIGIT;
+    if (type === 'd4') {
+      // un chiffre près de chaque coin, le haut tourné vers ce coin (lu sur le sommet du haut)
+      f.ids.forEach((id, k) => {
+        const dir = flat[k].clone().sub(center);
+        labelInfo.push({ ...vertexValues[id], fi: i, normal: f.normal, up: dir.clone().normalize(),
+          center: center.clone().addScaledVector(dir, fit.off), size });
+      });
+      return;
     }
     let up;
     if (type === 'd6') up = verts[f.ids[0]].clone().add(verts[f.ids[1]]).multiplyScalar(.5).sub(f.center);
     else {
+      // haut du chiffre vers le sommet le plus éloigné (pointe du d10, sommet des triangles et pentagones)
       let far = f.ids[0], best = -1;
       for (const id of f.ids) { const d = verts[id].distanceTo(f.center); if (d > best + 1e-6) { best = d; far = id; } }
       up = verts[far].clone().sub(f.center);
     }
-    if (type === 'd4') {
-      // un chiffre près de chaque coin, tourné vers ce coin
-      for (const id of f.ids) {
-        const dir = verts[id].clone().sub(f.center);
-        labelInfo.push({ ...vertexValues[id], fi: i, normal: f.normal, up: dir.clone().normalize(),
-          center: f.center.clone().addScaledVector(dir, 0.52), size: 2 * inr * 0.85 });
-      }
-      return;
-    }
     up.normalize();
-    const scale = { d6: 1.3, d8: 1.5, d10: 1.45, d12: 1.4, d20: 1.35, d100: 1.6 }[type];
-    labelInfo.push({ ...labels[i], fi: i, normal: f.normal, center: f.center, up, size: 2 * inr * scale });
+    labelInfo.push({ ...labels[i], fi: i, normal: f.normal, center: center.addScaledVector(up, fit.off * inr), up, size });
   });
   // Plan de chaque chiffre : uv = forme du chiffre, uv1 = même matière que la face en dessous
   for (const L of labelInfo) {
@@ -585,6 +701,7 @@ function templateFor(type) {
     ? verts.map((v, i) => ({ ...vertexValues[i], normal: v.clone().normalize() }))
     : labelInfo;
 
+  // Physique : polyèdre exact (mêmes plans de face que le rendu)
   const shape = new CANNON.ConvexPolyhedron({
     vertices: verts.map(v => new CANNON.Vec3(v.x, v.y, v.z)),
     faces: faces.map(f => f.ids),
