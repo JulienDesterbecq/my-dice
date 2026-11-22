@@ -638,27 +638,57 @@ floorMesh.receiveShadow = true;
 scene.add(floorMesh);
 
 /* ---------- Physique ---------- */
-const world = new CANNON.World({ gravity: new CANNON.Vec3(0, -40, 0) });
+// Échelle : 1 unité ≈ 1,6 cm (un d6 fait ~1 unité d'arête). La gravité réelle serait ~600 u/s² ;
+// on garde un peu moins (≈ un tiers) pour que l'œil suive le lancer, sans effet « lune ».
+const GRAVITY = 160;
+const STEP = 1 / 180;                                   // pas fin : chocs nets, pas de traversée
+const world = new CANNON.World({ gravity: new CANNON.Vec3(0, -GRAVITY, 0) });
 world.allowSleep = true;
 world.broadphase = new CANNON.SAPBroadphase(world);
+world.solver.iterations = 14;
+world.defaultContactMaterial.contactEquationRelaxation = 3;
 
 const diceMat = new CANNON.Material('dice');
-const tableMat = new CANNON.Material('table');
-world.addContactMaterial(new CANNON.ContactMaterial(diceMat, tableMat, { friction: 0.35, restitution: 0.3 }));
-world.addContactMaterial(new CANNON.ContactMaterial(diceMat, diceMat, { friction: 0.2, restitution: 0.35 }));
+const tableMat = new CANNON.Material('table');   // tapis de feutre : amortit, accroche
+const wallMat = new CANNON.Material('wall');     // bord de piste : plus dur, glissant
+world.addContactMaterial(new CANNON.ContactMaterial(diceMat, tableMat, {
+  friction: 0.4, restitution: 0.35, contactEquationStiffness: 5e6, contactEquationRelaxation: 3,
+  frictionEquationStiffness: 5e6, frictionEquationRelaxation: 3 }));
+world.addContactMaterial(new CANNON.ContactMaterial(diceMat, wallMat, { friction: 0.15, restitution: 0.45 }));
+world.addContactMaterial(new CANNON.ContactMaterial(diceMat, diceMat, { friction: 0.12, restitution: 0.5 }));
 
-function addPlane(euler) {
-  const b = new CANNON.Body({ mass: 0, shape: new CANNON.Plane(), material: tableMat });
+function addPlane(euler, material = wallMat) {
+  const b = new CANNON.Body({ mass: 0, shape: new CANNON.Plane(), material });
   b.quaternion.setFromEuler(...euler);
   world.addBody(b);
   return b;
 }
-addPlane([-Math.PI / 2, 0, 0]);                         // sol
+const floorBody = addPlane([-Math.PI / 2, 0, 0], tableMat);   // sol
 const wallLeft  = addPlane([0, Math.PI / 2, 0]);
 const wallRight = addPlane([0, -Math.PI / 2, 0]);
 const wallBack  = addPlane([0, 0, 0]);
 const wallFront = addPlane([0, Math.PI, 0]);
 addPlane([Math.PI / 2, 0, 0]).position.y = 14;          // plafond
+
+// Résistance au roulement du feutre : un dé posé sur le tapis perd sa rotation
+// (frottement « constant » + petite part visqueuse). En l'air, presque aucun freinage.
+// Les formes rondes (d20, d12) roulent plus longtemps qu'un cube.
+const ROLL_DRAG = { d4: [7, 1.0], d6: [5, 0.8], d8: [4, 0.8], d10: [3.5, 0.8], d100: [3.5, 0.8], d12: [2, 0.6], d20: [1.2, 0.4] };
+world.addEventListener('postStep', () => {
+  for (const c of world.contacts) {
+    const d = c.bi === floorBody ? c.bj.die : c.bj === floorBody ? c.bi.die : null;
+    if (d) { d.onFloor = true; d.lastFloor = simTime; }
+  }
+  for (const d of dice) {
+    if (!d.onFloor) continue;
+    d.onFloor = false;
+    const w = d.body.angularVelocity, [k, visc] = ROLL_DRAG[d.type];
+    const s = w.length();
+    if (s < 1e-6) continue;
+    const ns = Math.max(0, s * (1 - visc * STEP) - k * STEP);
+    w.scale(ns / s, w);
+  }
+});
 
 const arena = { xMin: -4, xMax: 4, zMin: -4, zMax: 4 };
 
@@ -686,19 +716,46 @@ function createDie(type) {
   }
   scene.add(mesh);
 
+  const mp = massProps(type, tpl.shape);
   const body = new CANNON.Body({
-    mass: 1, material: diceMat, shape: tpl.shape,
+    mass: mp.mass, material: diceMat, shape: tpl.shape,
     allowSleep: false,   // l'arrêt est détecté par la page (dé à plat et immobile)
-    linearDamping: 0.1, angularDamping: { d10: 0.25, d12: 0.35, d20: 0.35, d100: 0.25 }[type] ?? 0.12,
+    linearDamping: 0.01, angularDamping: 0.02,   // air : quasi rien, le tapis freine (ROLL_DRAG)
   });
+  // Inertie d'un solide plein (et non celle de sa boîte englobante, trop forte pour un d20)
+  body.inertia.copy(mp.inertia);
+  body.invInertia.set(1 / mp.inertia.x, 1 / mp.inertia.y, 1 / mp.inertia.z);
+  body.updateInertiaWorld(true);
   world.addBody(body);
   const die = { type, mesh, body, labelInfo: tpl.readInfo, value: null, text: '', rolling: false, rollStart: 0 };
   mesh.userData.die = die;
-  body.addEventListener('collide', e => {
-    const v = Math.abs(e.contact.getImpactVelocityAlongNormal());
-    if (v > 2) clack(v);
-  });
+  body.die = die;
+  body.addEventListener('collide', e => onDieCollide(die, e));
   return die;
+}
+
+// Masse ∝ volume (résine : un d6 de 16 mm ≈ 1) et tenseur d'inertie exact du polyèdre plein
+const massCache = {};
+function massProps(type, shape) {
+  if (massCache[type]) return massCache[type];
+  let V = 0, xx = 0, yy = 0, zz = 0;
+  const P = shape.vertices;
+  for (const f of shape.faces) {
+    for (let k = 1; k + 1 < f.length; k++) {
+      const a = P[f[0]], b = P[f[k]], c = P[f[k + 1]];
+      const v = a.dot(b.cross(c)) / 6;                    // tétraèdre (origine, a, b, c)
+      const m2 = (p, q, r) => (p * p + q * q + r * r + p * q + p * r + q * r) / 10;
+      V += v; xx += v * m2(a.x, b.x, c.x); yy += v * m2(a.y, b.y, c.y); zz += v * m2(a.z, b.z, c.z);
+    }
+  }
+  const s = Math.sign(V) || 1;
+  V *= s; xx *= s; yy *= s; zz *= s;
+  const D6_VOLUME = Math.pow(2 * TYPES.d6.radius / Math.sqrt(3), 3);
+  const rho = 1 / D6_VOLUME;
+  return (massCache[type] = {
+    mass: rho * V,
+    inertia: new CANNON.Vec3(rho * (yy + zz), rho * (xx + zz), rho * (xx + yy)),
+  });
 }
 
 function removeDie(d) {
@@ -721,29 +778,112 @@ function syncDice() {
 
 function rand(a, b) { return a + Math.random() * (b - a); }
 
-function rollDie(d, strength = 1) {
-  const b = d.body;
-  b.wakeUp();
+// Un lancer = un geste : la main part d'un bord de la piste (bas de l'écran, ou un côté),
+// lâche les dés groupés, à faible hauteur, vers le bord opposé, avec un roulé vers l'avant.
+// opts.from : 'front' | 'left' | 'right' (sinon choisi selon la forme de la piste) ;
+// opts.hand : point de départ imposé (dé repris là où il est).
+function makeThrow(list, strength = 1, opts = {}) {
+  const W = arena.xMax - arena.xMin, Dz = arena.zMax - arena.zMin;
   const cx = (arena.xMin + arena.xMax) / 2, cz = (arena.zMin + arena.zMax) / 2;
-  const mx = Math.max(0.5, (arena.xMax - arena.xMin) / 2 - 1.2), mz = Math.max(0.5, (arena.zMax - arena.zMin) / 2 - 1.2);
-  b.position.set(cx + rand(-mx, mx), rand(3, 7), cz + rand(-mz, mz));
-  b.quaternion.setFromEuler(rand(0, 6.28), rand(0, 6.28), rand(0, 6.28));
-  const dir = new CANNON.Vec3(cx - b.position.x + rand(-1.5, 1.5), 0, cz - b.position.z + rand(-1.5, 1.5));
-  dir.normalize();
-  const speed = rand(7, 13) * strength;
-  b.velocity.set(dir.x * speed, rand(-2, 4), dir.z * speed);
-  b.angularVelocity.set(rand(-25, 25), rand(-25, 25), rand(-25, 25));
+  let from = opts.from;
+  if (!from) {   // on lance plutôt dans la longueur de la piste
+    const r = Math.random(), pFront = W > Dz * 1.2 ? 0.15 : 0.6;
+    from = r < pFront ? 'front' : r < (1 + pFront) / 2 ? 'left' : 'right';
+  }
+  // direction du geste (vers l'intérieur) et position de la main, près du bord
+  const dir = from === 'front' ? new CANNON.Vec3(0, 0, -1) : new CANNON.Vec3(from === 'left' ? 1 : -1, 0, 0);
+  let along = Math.abs(dir.z) > 0 ? Dz : W, across = Math.abs(dir.z) > 0 ? W : Dz;
+  const maxR = Math.max(...list.map(d => TYPES[d.type].radius));
+  const inset = Math.min(along * 0.3, maxR + 0.4);
+  const hand = new CANNON.Vec3(
+    from === 'front' ? cx + rand(-0.2, 0.2) * W : from === 'left' ? arena.xMin + inset : arena.xMax - inset, 0,
+    from === 'front' ? arena.zMax - inset : cz + rand(-0.2, 0.2) * Dz);
+  if (opts.hand) {
+    hand.set(opts.hand.x, 0, opts.hand.z);
+    dir.set(cx - hand.x + rand(-1, 1), 0, cz - hand.z + rand(-1, 1));
+    if (dir.length() < 0.5) dir.set(rand(-1, 1), 0, rand(-1, 1));
+    dir.normalize();
+    along = Math.max(3, Math.min(W, Dz) * 0.7); across = 3;
+  }
+  // dérive de quelques degrés : on ne lance jamais parfaitement droit
+  const yaw = rand(-0.3, 0.3);
+  dir.set(dir.x * Math.cos(yaw) - dir.z * Math.sin(yaw), 0, dir.x * Math.sin(yaw) + dir.z * Math.cos(yaw));
+  const side = new CANNON.Vec3(-dir.z, 0, dir.x);          // perpendiculaire, dans le plan
+
+  // Dés groupés « dans la main » : petit tas sans chevauchement (sphères englobantes),
+  // qui s'élargit (puis s'élève) s'il n'y a pas la place, sans jamais sortir de la piste.
+  const placed = dice.filter(o => !list.includes(o)).map(o => ({ c: o.body.position, r: TYPES[o.type].radius * 1.02 }));
+  const free = (c, r) => placed.every(o => o.c.distanceTo(c) > o.r + r + 0.08);
+  const clampIn = (c, r) => {
+    c.x = Math.min(arena.xMax - r - 0.05, Math.max(arena.xMin + r + 0.05, c.x));
+    c.z = Math.min(arena.zMax - r - 0.05, Math.max(arena.zMin + r + 0.05, c.z));
+    return c;
+  };
+  const slots = list.map(d => {
+    const r = TYPES[d.type].radius * 1.02;
+    let p = null;
+    for (let tries = 0; tries < 300 && !p; tries++) {
+      const g = 1 + tries / 50;
+      const c = clampIn(new CANNON.Vec3(
+        hand.x + side.x * rand(-1, 1) * 1.2 * g + dir.x * rand(0, 1.5 * g),
+        r + rand(2.2, 3.4 + 1.3 * g),
+        hand.z + side.z * rand(-1, 1) * 1.2 * g + dir.z * rand(0, 1.5 * g)), r);
+      if (c.y < 10 && free(c, r)) p = c;
+    }
+    for (let tries = 0; tries < 300 && !p; tries++) {   // piste très encombrée : n'importe où
+      const c = new CANNON.Vec3(rand(arena.xMin, arena.xMax), rand(r + 0.5, 11), rand(arena.zMin, arena.zMax));
+      if (free(clampIn(c, r), r)) p = c;
+    }
+    p = p || clampIn(new CANNON.Vec3(cx, 12, cz), r);
+    placed.push({ c: p, r });
+    return p;
+  });
+  // Vitesse : de quoi traverser une bonne part de la piste et parfois toucher le bord opposé
+  const speed = THREE.MathUtils.clamp(along * 2, 12, 24) * strength * rand(0.85, 1.1);
+  // roulé vers l'avant : le point bas du dé recule (ω × (−R·y) = −v), comme en quittant les doigts
+  const spinAxis = new CANNON.Vec3(dir.z, 0, -dir.x);
+  const spin = rand(15, 30) * Math.sqrt(strength);
+  return list.map((d, i) => ({
+    pos: slots[i],
+    vel: new CANNON.Vec3(dir.x * speed * rand(0.88, 1.08) + side.x * rand(-2, 2),
+                         rand(1, 6) * strength,
+                         dir.z * speed * rand(0.88, 1.08) + side.z * rand(-2, 2)),
+    // spin commun + part propre à chaque dé (ils se choquent dans la main)
+    ang: new CANNON.Vec3(spinAxis.x * spin + rand(-8, 8), rand(-8, 8), spinAxis.z * spin + rand(-8, 8)),
+  }));
+}
+
+function startRolling(d) {
   d.value = null;
   d.rolling = true;
-  d.calm = 0;
+  d.calm = 0; d.stuck = 0; d.nudges = 0; d.rerolls = 0;
   d.rollStart = simTime;
 }
 
-function rollAll(strength = 1) {
+function rollDie(d, strength = 1, slot) {
+  const b = d.body;
+  b.wakeUp();
+  if (!slot) d.throwStart = simTime;                        // dé lancé seul (toucher)
+  slot = slot || makeThrow([d], strength, { hand: b.position })[0];
+  b.position.copy(slot.pos);
+  b.previousPosition.copy(slot.pos);
+  b.interpolatedPosition.copy(slot.pos);
+  // orientation uniforme (méthode de Shoemake) : aucune face favorisée au départ
+  const u1 = Math.random(), u2 = Math.random() * 2 * Math.PI, u3 = Math.random() * 2 * Math.PI;
+  const s1 = Math.sqrt(1 - u1), s2 = Math.sqrt(u1);
+  b.quaternion.set(s1 * Math.sin(u2), s1 * Math.cos(u2), s2 * Math.sin(u3), s2 * Math.cos(u3));
+  b.previousQuaternion.copy(b.quaternion);
+  b.velocity.copy(slot.vel);
+  b.angularVelocity.copy(slot.ang);
+  startRolling(d);
+}
+
+function rollAll(strength = 1, opts = {}) {
   if (!dice.length) return;
   hideHint();
-  dice.forEach(d => rollDie(d, strength));
-  if (navigator.vibrate) navigator.vibrate(30);
+  const slots = makeThrow(dice, strength, opts);
+  dice.forEach((d, i) => { d.throwStart = simTime; rollDie(d, strength, slots[i]); });
+  if (navigator.vibrate && navigator.userActivation?.hasBeenActive) navigator.vibrate(30);
   updateResult();
 }
 
@@ -959,15 +1099,31 @@ const shakeBtn = document.getElementById('shakeBtn');
 let motionOn = false, lastShake = 0, last = null;
 const needsPermission = typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function';
 
+// Comme un gobelet : on secoue (les dés cliquettent « dans la main »), le lancer part quand
+// on s'arrête (ou après 1,2 s). Force selon l'énergie de la secousse ; le sens du dernier
+// coup horizontal choisit le côté d'où partent les dés.
+let shakeStart = 0, shakeLastStrong = 0, shakePeak = 0, shakeEnergy = 0, shakeX = 0, lastRattle = 0;
 function onMotion(e) {
   const a = e.accelerationIncludingGravity || e.acceleration;
   if (!a || a.x == null) return;
+  const now = performance.now();
   if (last) {
-    const delta = Math.abs(a.x - last.x) + Math.abs(a.y - last.y) + Math.abs(a.z - last.z);
-    const now = performance.now();
-    if (delta > 22 && now - lastShake > 700) {
-      lastShake = now;
-      rollAll(Math.min(1.6, delta / 25));
+    const dx = a.x - last.x, dy = a.y - last.y, dz = a.z - last.z;
+    const jerk = Math.hypot(dx, dy, dz);
+    if (jerk > 14 && now - lastShake > 900) {
+      if (!shakeStart) { shakeStart = now; shakePeak = 0; shakeEnergy = 0; }
+      shakePeak = Math.max(shakePeak, jerk);
+      shakeEnergy += jerk;
+      shakeX = dx; shakeLastStrong = now;
+      if (dice.length > 1 && now - lastRattle > 90) { lastRattle = now; clack(rand(5, 12), 'dice', 1); }
+    }
+    if (shakeStart) {
+      const quiet = now - shakeLastStrong > 250;
+      if ((quiet && now - shakeStart > 120) || now - shakeStart > 1200) {
+        const strength = THREE.MathUtils.clamp(0.55 + shakePeak / 60 + shakeEnergy / 600, 0.6, 1.5);
+        shakeStart = 0; lastShake = now;
+        rollAll(strength, { from: Math.abs(shakeX) > 10 ? (shakeX > 0 ? 'left' : 'right') : 'front' });
+      }
     }
   }
   last = { x: a.x, y: a.y, z: a.z };
@@ -993,26 +1149,110 @@ if (typeof DeviceMotionEvent !== 'undefined') {
   }
 }
 
-/* ---------- Son de choc (synthétisé) ---------- */
-let audioCtx = null, lastClack = 0;
-function clack(v) {
-  const now = performance.now();
-  if (now - lastClack < 35) return;
-  lastClack = now;
+/* ---------- Son (synthétisé en Web Audio, démarre au premier geste) ---------- */
+let audioCtx = null, master = null, noiseBuf = null, rollGain = null, rollFilter = null;
+function ensureAudio() {
   try {
-    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    if (!audioCtx) {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const comp = audioCtx.createDynamicsCompressor();
+      comp.threshold.value = -14; comp.knee.value = 10; comp.ratio.value = 4;
+      master = audioCtx.createGain(); master.gain.value = 0.9;
+      master.connect(comp).connect(audioCtx.destination);
+      const sr = audioCtx.sampleRate;
+      noiseBuf = audioCtx.createBuffer(1, sr, sr);
+      const n = noiseBuf.getChannelData(0);
+      for (let i = 0; i < n.length; i++) n[i] = Math.random() * 2 - 1;
+      // Roulement sur le feutre : souffle grave continu, volume piloté par la vitesse des dés
+      const src = audioCtx.createBufferSource(); src.buffer = noiseBuf; src.loop = true;
+      rollFilter = audioCtx.createBiquadFilter(); rollFilter.type = 'lowpass'; rollFilter.frequency.value = 500; rollFilter.Q.value = 0.5;
+      rollGain = audioCtx.createGain(); rollGain.gain.value = 0;
+      src.connect(rollFilter).connect(rollGain).connect(master);
+      src.start();
+    }
     if (audioCtx.state === 'suspended') audioCtx.resume();
-    const len = 0.05;
-    const buf = audioCtx.createBuffer(1, Math.floor(audioCtx.sampleRate * len), audioCtx.sampleRate);
-    const data = buf.getChannelData(0);
-    for (let i = 0; i < data.length; i++) data[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / data.length, 4);
-    const src = audioCtx.createBufferSource(); src.buffer = buf;
-    const filter = audioCtx.createBiquadFilter(); filter.type = 'bandpass';
-    filter.frequency.value = rand(1800, 3200); filter.Q.value = 1.5;
-    const gain = audioCtx.createGain(); gain.gain.value = Math.min(0.5, v / 30);
-    src.connect(filter).connect(gain).connect(audioCtx.destination);
-    src.start();
-  } catch (_) {}
+  } catch (_) { audioCtx = null; }
+}
+['pointerdown', 'keydown', 'touchend'].forEach(t => window.addEventListener(t, ensureAudio, { capture: true, passive: true }));
+
+const audioReady = () => audioCtx && audioCtx.state === 'running';
+let voices = [];   // instants des derniers chocs joués (anti-mitraillage)
+
+// Bruit bref filtré, enveloppe percussive
+function noiseHit(t, type, freq, Q, gain, decay) {
+  const src = audioCtx.createBufferSource(); src.buffer = noiseBuf;
+  const f = audioCtx.createBiquadFilter(); f.type = type; f.frequency.value = freq; f.Q.value = Q;
+  const g = audioCtx.createGain();
+  g.gain.setValueAtTime(0, t);
+  g.gain.linearRampToValueAtTime(gain, t + 0.0015);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + decay);
+  src.connect(f).connect(g).connect(master);
+  src.start(t, Math.random() * 0.8, decay + 0.02);
+}
+// Mode de résonance du dé (sinus amorti)
+function ping(t, freq, gain, decay) {
+  const o = audioCtx.createOscillator(); o.frequency.value = freq;
+  const g = audioCtx.createGain();
+  g.gain.setValueAtTime(0, t);
+  g.gain.linearRampToValueAtTime(gain, t + 0.001);
+  g.gain.exponentialRampToValueAtTime(0.0001, t + decay);
+  o.connect(g).connect(master);
+  o.start(t); o.stop(t + decay + 0.02);
+}
+
+// kind : 'felt' (dé / tapis), 'dice' (dé / dé), 'wall' (bord) ; v : vitesse d'impact ; size : rayon
+function clack(v, kind = 'felt', size = 1) {
+  if (!audioReady()) return;
+  const x = Math.min(1, Math.max(0, (v - 2.5) / 35));
+  if (x <= 0) return;
+  const t = audioCtx.currentTime;
+  voices = voices.filter(s => t - s < 0.05);
+  if (voices.length >= 4 || (voices.length >= 2 && x < 0.25)) return;   // trop de chocs à la fois
+  voices.push(t);
+  const amp = Math.pow(x, 1.4);
+  const pitch = 1 / size;                                  // petit dé = son plus aigu
+  if (kind === 'dice') {
+    // clic sec de résine : attaque brillante + deux modes aigus très courts
+    noiseHit(t, 'bandpass', rand(4500, 6500) * pitch, 2.5, 0.55 * amp, 0.012);
+    ping(t, rand(3000, 3600) * pitch, 0.22 * amp, rand(0.025, 0.04));
+    ping(t, rand(5200, 6100) * pitch, 0.12 * amp, rand(0.015, 0.025));
+  } else if (kind === 'wall') {
+    // bord de piste : toc boisé, plus mat
+    noiseHit(t, 'bandpass', rand(900, 1300), 3, 0.5 * amp, 0.05);
+    ping(t, rand(2400, 2900) * pitch, 0.06 * amp, 0.02);
+  } else {
+    // tapis : choc sourd et feutré, la résine ne sonne presque pas
+    noiseHit(t, 'lowpass', 350 + 900 * x, 0.8, 0.9 * amp, 0.03 + 0.03 * x);
+    noiseHit(t, 'bandpass', rand(2200, 3000) * pitch, 4, 0.07 * amp, 0.01);
+  }
+}
+
+function onDieCollide(die, e) {
+  const other = e.body;
+  const v = Math.abs(e.contact.getImpactVelocityAlongNormal());
+  if (other.die) {
+    if (die.body.id > other.id) return;                    // un seul son par paire
+    // un dé arrêté heurté par un dé en mouvement se remet à rouler (sa valeur peut changer)
+    for (const [a, b] of [[die, other.die], [other.die, die]]) {
+      if (!a.rolling && b.rolling && v > 3) { a.body.wakeUp(); startRolling(a); updateResult(); }
+    }
+    clack(v, 'dice', (TYPES[die.type].radius + TYPES[other.die.type].radius) / 2);
+  } else {
+    clack(v, other === floorBody ? 'felt' : 'wall', TYPES[die.type].radius);
+  }
+}
+
+function updateRollingSound() {
+  if (!audioReady()) return;
+  let e = 0;
+  for (const d of dice) {
+    if (!d.rolling || !(simTime - d.lastFloor < 0.05)) continue;
+    const vel = d.body.velocity;
+    e += vel.x * vel.x + vel.z * vel.z;
+  }
+  const sp = Math.sqrt(e);
+  rollGain.gain.setTargetAtTime(Math.min(0.05, sp * 0.0025), audioCtx.currentTime, 0.05);
+  rollFilter.frequency.setTargetAtTime(300 + Math.min(900, sp * 25), audioCtx.currentTime, 0.05);
 }
 
 /* ---------- Boucle ---------- */
@@ -1021,7 +1261,7 @@ let simTime = 0;
 function tick(now) {
   const dt = Math.min(0.05, (now - prev) / 1000);
   prev = now;
-  world.step(1 / 120, dt, 10);
+  world.step(STEP, dt, 12);
   simTime += dt;
 
   let changed = false;
@@ -1029,26 +1269,59 @@ function tick(now) {
     d.mesh.position.copy(d.body.position);
     d.mesh.quaternion.copy(d.body.quaternion);
     if (!d.rolling) continue;
-    // Presque immobile pendant 0,3 s → on considère le dé arrêté
-    const slow = d.body.velocity.length() < 0.3 && d.body.angularVelocity.length() < 0.8 && simTime - d.rollStart > 0.4;
-    const flat = topAlignment(d) > 0.97;
+    const b = d.body, age = simTime - d.rollStart;
+    const v = b.velocity.length(), w = b.angularVelocity.length();
+    const align = topAlignment(d);
+    // Posé sur une face et presque immobile pendant 0,15 s → arrêté
+    const slow = v < 0.6 && w < 1.2 && age > 0.3;
+    const flat = align > 0.985;
     d.calm = slow && flat ? d.calm + dt : 0;
-    // Coincé en équilibre sur une arête : petite pichenette
-    d.stuck = slow && !flat ? (d.stuck || 0) + dt : 0;
-    if (d.stuck > 0.6) {
-      d.stuck = 0;
-      d.body.wakeUp();
-      d.body.velocity.y += 2;
-      d.body.angularVelocity.set(rand(-4, 4), rand(-4, 4), rand(-4, 4));
+    // Coincé de travers (appuyé sur un autre dé ou un bord) : petite pichenette
+    d.stuck = slow && !flat ? d.stuck + dt : 0;
+    const late = simTime - (d.throwStart ?? d.rollStart) > 4.5;   // le lancer s'éternise
+    if (d.stuck > 0.25 && d.nudges >= (late ? 1 : 4) && (d.rerolls || 0) < 3) {
+      // toujours calé de travers : on le reprend et on le relâche juste à côté (dé « cassé »)
+      const n = (d.rerolls || 0) + 1;
+      rollDie(d, 0.45, makeThrow([d], 0.45, { hand: b.position })[0]);
+      d.rerolls = n;
+      continue;
     }
-    if (d.calm > 0.3 || simTime - d.rollStart > 5) {
+    if (d.stuck > 0.25) {
+      d.stuck = 0; d.nudges++;
+      b.wakeUp();
+      // on l'écarte de ce qui le cale (dé voisin ou bord), comme d'un petit coup de doigt
+      const p = b.position, push = new CANNON.Vec3(rand(-0.3, 0.3), 0, rand(-0.3, 0.3));
+      for (const o of dice) {
+        if (o === d) continue;
+        const dx = p.x - o.body.position.x, dz = p.z - o.body.position.z, dist = Math.hypot(dx, dz);
+        const reach = (TYPES[d.type].radius + TYPES[o.type].radius) * 1.15;
+        if (dist < reach) { push.x += dx / (dist + 1e-3); push.z += dz / (dist + 1e-3); }
+      }
+      const r = TYPES[d.type].radius * 1.3;
+      if (p.x - arena.xMin < r) push.x += 1; if (arena.xMax - p.x < r) push.x -= 1;
+      if (p.z - arena.zMin < r) push.z += 1; if (arena.zMax - p.z < r) push.z -= 1;
+      const n = Math.hypot(push.x, push.z) || 1, k = Math.min(2.5, 1 + 0.3 * d.nudges);
+      b.velocity.set(push.x / n * 4 * k, 7 * k, push.z / n * 4 * k);
+      b.angularVelocity.set(rand(-10, 10) * k, rand(-10, 10) * k, rand(-10, 10) * k);
+    }
+    // Filets de sécurité : un dé sorti de la piste est relancé ; au-delà de 5 s on lit
+    // dès qu'il est à plat ; 7 s après le geste, on accepte une face presque à plat ;
+    // à 10 s on lit quoi qu'il arrive (jamais observé dans les mesures).
+    const p = b.position;
+    if (p.y < -1 || p.x < arena.xMin - 1 || p.x > arena.xMax + 1 || p.z < arena.zMin - 1 || p.z > arena.zMax + 1) {
+      rollDie(d, 0.6, makeThrow([d], 0.6, { hand: new CANNON.Vec3((arena.xMin + arena.xMax) / 2, 0, (arena.zMin + arena.zMax) / 2) })[0]);
+      continue;
+    }
+    const total = simTime - (d.throwStart ?? d.rollStart);
+    if (d.calm > 0.15 || ((age > 5 || late) && flat && v < 1.5 && w < 3) || (total > 7 && align > 0.97 && v < 3 && b.position.y < TYPES[d.type].radius) || age > 9 || total > 10) {
       d.rolling = false;
-      d.body.velocity.setZero(); d.body.angularVelocity.setZero(); d.body.sleep();
+      b.velocity.setZero(); b.angularVelocity.setZero(); b.sleep();
       const L = readFace(d);
       d.value = L.value; d.text = L.text;
       changed = true;
     }
   }
+  updateRollingSound();
   if (changed) updateResult();
   renderer.render(scene, camera);
   requestAnimationFrame(tick);
@@ -1078,7 +1351,7 @@ rollAll();
 requestAnimationFrame(tick);
 
 // accès pour tests
-window.__dice = { setStyle: k => { styleKey = k; applyStyle(); }, dice, counts, syncDice, rollAll, camera, sim: () => simTime };
+window.__dice = { arena, setStyle: k => { styleKey = k; applyStyle(); }, dice, counts, syncDice, rollAll, camera, sim: () => simTime };
 </script>
 <script>
   setTimeout(function () { if (!window.__diceLoaded) document.getElementById('err').style.display = 'grid'; }, 8000);
