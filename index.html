@@ -290,7 +290,7 @@ function templateFor(type) {
       up = verts[far].clone().sub(f.center);
     }
     up.normalize();
-    const scale = { d6: 1.8, d8: 1.5, d10: 1.45, d12: 1.4, d20: 1.35, d100: 1.6 }[type];
+    const scale = { d6: 0.92, d8: 1.5, d10: 1.45, d12: 1.4, d20: 1.35, d100: 1.6 }[type];
     return { ...labels[i], normal: f.normal, center: f.center, up, size: 2 * inr * scale };
   });
 
