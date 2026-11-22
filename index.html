@@ -173,6 +173,11 @@ try {
   const saved = JSON.parse(localStorage.getItem('dice-colors') || '{}');
   for (const k in saved) if (TYPES[k]) Object.assign(TYPES[k], saved[k]);
 } catch (_) {}
+// Temps simulé ; le résultat ne s'affiche que si tous les dés sont arrêtés depuis un court
+// instant (un dé lu peut encore être bousculé par un voisin)
+let simTime = 0;
+const SETTLE_DELAY = 0.3;
+let lastSettle = -1, resultPending = false;
 const counts = { d4: 0, d6: 2, d8: 0, d10: 0, d12: 0, d20: 0, d100: 0 };
 
 /* ---------- Construction des polyèdres ---------- */
@@ -1309,6 +1314,8 @@ function updateResult() {
   if (!dice.length) { el.textContent = 'Ajoutez des dés avec les boutons du bas'; return; }
   if (dice.some(d => d.rolling)) { el.textContent = 'Lancer en cours…'; return; }
   if (dice.some(d => d.value == null)) { el.textContent = 'Touchez un dé ou secouez le téléphone'; return; }
+  if (simTime - lastSettle <= SETTLE_DELAY) { el.textContent = 'Lancer en cours…'; resultPending = true; return; }
+  resultPending = false;
 
   const total = dice.reduce((s, d) => s + d.value, 0);
   const chips = dice.map(d => {
@@ -1671,7 +1678,6 @@ function updateRollingSound() {
 
 /* ---------- Boucle ---------- */
 let prev = performance.now();
-let simTime = 0;
 function tick(now) {
   const dt = Math.min(0.05, (now - prev) / 1000);
   prev = now;
@@ -1682,13 +1688,20 @@ function tick(now) {
   for (const d of dice) {
     d.mesh.position.copy(d.body.position);
     d.mesh.quaternion.copy(d.body.quaternion);
-    if (!d.rolling) continue;
+    if (!d.rolling) {
+      // un dé déjà lu qu'un voisin a fait basculer ou glisser se remet à rouler
+      if (d.value != null && (topAlignment(d) < 0.97 || d.body.velocity.length() > 0.8 || d.body.angularVelocity.length() > 1.5)) {
+        d.body.wakeUp(); startRolling(d); changed = true;
+      }
+      continue;
+    }
     const b = d.body, age = simTime - d.rollStart;
     const v = b.velocity.length(), w = b.angularVelocity.length();
     const align = topAlignment(d);
     // Posé sur une face et presque immobile pendant 0,15 s → arrêté
     const slow = v < 0.6 && w < 1.2 && age > 0.3;
-    const flat = align > 0.985;
+    // à plat ET posé sur le tapis (pas en équilibre sur un autre dé)
+    const flat = align > 0.985 && b.position.y < TYPES[d.type].radius * 1.25;
     d.calm = slow && flat ? d.calm + dt : 0;
     // Coincé de travers (appuyé sur un autre dé ou un bord) : petite pichenette
     d.stuck = slow && !flat ? d.stuck + dt : 0;
@@ -1732,11 +1745,12 @@ function tick(now) {
       b.velocity.setZero(); b.angularVelocity.setZero(); b.sleep();
       const L = readFace(d);
       d.value = L.value; d.text = L.text;
+      lastSettle = simTime;
       changed = true;
     }
   }
   updateRollingSound();
-  if (changed) updateResult();
+  if (changed || (resultPending && simTime - lastSettle > SETTLE_DELAY)) updateResult();
   updateContactShadows();
   renderer.render(scene, camera);
   requestAnimationFrame(tick);
