@@ -328,14 +328,19 @@ function boxBlur(src, S, r) {
 }
 
 /* ---------- Matières (textures procédurales) ---------- */
+// Chaque matière = une carte de couleur en niveaux de gris (teintée par la couleur du dé)
+// + une carte « données » linéaire : R = relief (bumpMap), G = rugosité, B = métal
+// (+ une normalMap pour les paillettes). Rugosité/métal absolus dans la carte : le
+// matériau du corps utilise roughness = metalness = 1 ; `roughness` ci-dessous sert aux chiffres.
+// labelMap : le fond des chiffres montre la matière (gravure à nu, métal) au lieu d'une peinture unie.
 const STYLES = {
-  marbre: { name: 'Marbre', pattern: 'marble', roughness: 0.2, clearcoat: 1 },
-  bois:   { name: 'Bois',   pattern: 'wood',  bump: 2, roughness: 0.6, clearcoat: 0.25, tint: ['#a8743f', 0.55] },
-  pierre: { name: 'Pierre', pattern: 'stone', bump: 3, roughness: 0.9, tint: ['#9a958c', 0.45] },
-  metal:  { name: 'Métal',  pattern: 'metal', roughness: 0.38, metalness: 0.9, envIntensity: 3, tint: ['#c8ccd2', 0.35] },
-  resine: { name: 'Résine', roughness: 0.3, clearcoat: 0.6 },
+  marbre: { name: 'Marbre', pattern: 'marble', roughness: 0.18, clearcoat: 1, ccRough: 0.03 },
+  bois:   { name: 'Bois',   pattern: 'wood',  bump: 0.5, roughness: 0.55, clearcoat: 0.35, ccRough: 0.32, tint: ['#a8743f', 0.55] },
+  pierre: { name: 'Pierre', pattern: 'stone', bump: 0.5, roughness: 0.5, clearcoat: 0.15, ccRough: 0.25, tint: ['#9a958c', 0.45] },
+  metal:  { name: 'Métal',  pattern: 'metal', bump: 0.5, roughness: 0.4, metalness: 1, envIntensity: 2.6, anisotropy: 0.55, tint: ['#c8ccd2', 0.35], labelMap: true },
+  resine: { name: 'Résine', pattern: 'resin', bump: 0.25, roughness: 0.3, clearcoat: 0.45, ccRough: 0.1 },
   verre:  { name: 'Verre', glass: true, roughness: 0.03, transmission: 0.9, thickness: 0.8, attDist: 1.2, whiten: 0.4 },
-  paillettes: { name: 'Paillettes', glass: true, roughness: 0.2, transmission: 0.78, thickness: 0.8, attDist: 1.0, whiten: 0.3, sparkle: true },
+  paillettes: { name: 'Paillettes', glass: true, pattern: 'sparkle', roughness: 0.2, transmission: 0.8, thickness: 0.8, attDist: 1.0, whiten: 0.3, sparkle: true },
 };
 let styleKey = 'marbre';
 try { const v = localStorage.getItem('dice-style'); if (STYLES[v]) styleKey = v; } catch (_) {}
@@ -345,11 +350,14 @@ function hash2(x, y, s) {
   h = Math.imul(h ^ (h >>> 13), 1274126177);
   return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
 }
+// Bruit de valeur sur une table 256×256 précalculée (bien plus rapide que de hacher chaque coin)
+const NOISE_T = (() => { const t = new Float32Array(65536); for (let i = 0; i < 65536; i++) t[i] = hash2(i & 255, i >> 8, 7); return t; })();
 function vnoise(x, y, s) {
   const xi = Math.floor(x), yi = Math.floor(y);
   let xf = x - xi, yf = y - yi;
   xf = xf * xf * (3 - 2 * xf); yf = yf * yf * (3 - 2 * yf);
-  const a = hash2(xi, yi, s), b = hash2(xi + 1, yi, s), c = hash2(xi, yi + 1, s), d = hash2(xi + 1, yi + 1, s);
+  const x0 = (xi + s * 157) & 255, x1 = (x0 + 1) & 255, y0 = ((yi + s * 89) & 255) << 8, y1 = (y0 + 256) & 65280;
+  const a = NOISE_T[y0 + x0], b = NOISE_T[y0 + x1], c = NOISE_T[y1 + x0], d = NOISE_T[y1 + x1];
   return a + (b - a) * xf + (c - a) * yf + (a - b - c + d) * xf * yf;
 }
 function fbm(x, y, oct, s) {
@@ -357,45 +365,187 @@ function fbm(x, y, oct, s) {
   for (let i = 0; i < oct; i++) { v += amp * vnoise(x * f, y * f, s + i); norm += amp; f *= 2; amp *= 0.5; }
   return v / norm;
 }
+const clamp01 = x => x < 0 ? 0 : x > 1 ? 1 : x;
+const smooth = (a, b, x) => { const t = clamp01((x - a) / (b - a)); return t * t * (3 - 2 * t); };
 
+// Génère (une fois, en cache) les cartes d'une matière
 const patternCache = {};
-function patternTexture(kind) {
+function patternMaps(kind) {
   if (patternCache[kind]) return patternCache[kind];
-  const S = 512, c = document.createElement('canvas');
-  c.width = c.height = S;
-  const g = c.getContext('2d'), img = g.createImageData(S, S);
-  for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
-    const u = x / S, v = y / S;
-    let val;
-    if (kind === 'marble') {
-      const t = fbm(u * 5, v * 5, 5, 1);
-      const s1 = Math.abs(Math.sin((u * 3 + v * 2 + t * 4) * Math.PI));
-      const s2 = Math.abs(Math.sin((-u * 2 + v * 6 + fbm(u * 9, v * 9, 4, 7) * 3) * Math.PI));
-      const cloud = fbm(u * 3, v * 3, 4, 17);
-      val = 1.0 - 0.45 * Math.pow(1 - s1, 5) - 0.2 * Math.pow(1 - s2, 9) - 0.25 * cloud;
-    } else if (kind === 'wood') {
-      const t = fbm(u * 2, v * 6, 4, 3);
-      const r = v * 22 + t * 4, f = r - Math.floor(r);
-      const ring = Math.pow(Math.sin(f * Math.PI), 0.35);           // fines lignes sombres entre les cernes
-      val = 0.55 + 0.3 * ring + 0.1 * Math.sin(r * 0.5) + 0.12 * (fbm(u * 90, v * 4, 3, 9) - 0.5);
-    } else if (kind === 'stone') {
-      const t = fbm(u * 8, v * 8, 6, 5), sp = hash2(x, y, 11);
-      val = 0.35 + 0.6 * t + 0.18 * (vnoise(u * 90, v * 90, 13) - 0.5) + (sp > 0.985 ? 0.3 : sp < 0.02 ? -0.35 : 0);
-    } else if (kind === 'sparkle') {
-      const hsp = hash2(x, y, 31);
-      val = hsp > 0.993 ? 0.6 + (hsp - 0.993) * 57 : 0;            // points brillants épars
-    } else {
-      val = 0.8 + 0.3 * (fbm(u * 3, v * 180, 3, 21) - 0.5) + 0.08 * (fbm(u * 8, v * 8, 3, 4) - 0.5);
+  const S = 512, N = S * S;
+  const col = new Float32Array(N).fill(1), hgt = new Float32Array(N).fill(0.5);
+  const rgh = new Float32Array(N).fill(0.5), mtl = new Float32Array(N);
+  let nrm = null;           // normales de paillettes (x, y) ou null
+  const mk = () => { const c = document.createElement('canvas'); c.width = c.height = S; return c; };
+  const cCol = mk(), cDat = mk();
+  let strokes = null;       // rayures dessinées après coup (métal, résine)
+
+  if (kind === 'marble') {
+    // Veines qui « coulent » dans une direction (sinus perturbé par turbulence),
+    // réseau de fines veines secondaires, et une copie large et pâle des veines
+    // qui simule leur prolongement sous la surface, vu à travers le vernis.
+    for (let y = 0, i = 0; y < S; y++) for (let x = 0; x < S; x++, i++) {
+      const u = x / S, v = y / S;
+      const wx = u + 0.22 * fbm(u * 3, v * 3, 3, 1), wy = v + 0.22 * fbm(u * 3 + 5.2, v * 3 + 1.3, 3, 2);
+      const t = fbm(wx * 4, wy * 4, 4, 3);
+      const s1 = 1 - Math.abs(Math.sin((wx * 1.3 + wy * 0.8) * 13 + t * 8));
+      const r2 = 1 - Math.abs(2 * fbm(wx * 12 + 3.1, wy * 12, 3, 11) - 1);
+      const cloud = 0.6 * vnoise(u * 5, v * 5, 17) + 0.4 * vnoise(u * 11, v * 11, 18);
+      const vein = Math.pow(s1, 26) * (0.55 + 0.45 * smooth(0.3, 0.6, t));
+      const deep = Math.pow(s1, 4), thin = Math.pow(r2, 40) * smooth(0.35, 0.7, cloud);
+      const milk = smooth(0.4, 0.75, t);                      // nuages laiteux plus clairs
+      col[i] = 0.9 + 0.1 * milk - 0.07 * cloud - 0.2 * deep - 0.5 * vein - 0.3 * thin;
+      rgh[i] = 0.14 + 0.1 * vein + 0.06 * thin + 0.05 * cloud;
+      hgt[i] = 0.5 - 0.2 * vein;
     }
-    const o = (y * S + x) * 4, b = Math.max(0, Math.min(255, val * 255));
-    img.data[o] = img.data[o + 1] = img.data[o + 2] = b; img.data[o + 3] = 255;
+  } else if (kind === 'wood') {
+    // Cernes en arcs (débit sur dosse) : bois de printemps clair et poreux, bois d'été
+    // sombre et dense qui finit net ; fibres, pores allongés, rayons médullaires.
+    for (let y = 0, i = 0; y < S; y++) for (let x = 0; x < S; x++, i++) {
+      const u = x / S, v = y / S;
+      const warp = fbm(u * 2.5, v * 4, 3, 3) - 0.5;
+      // plan de coupe légèrement incliné par rapport au tronc : arcs « en cathédrale »
+      const dist = Math.hypot(v - 0.5 + 0.06 * warp, 0.1 + 0.22 * u);
+      const rp = dist * 34 + warp * 1.2 + 0.12 * (vnoise(u * 2, v * 30, 5) - 0.5);
+      const ri = Math.floor(rp), f = rp - ri;
+      const rv = hash2(ri, 0, 41), rw = hash2(ri, 1, 42);      // chaque cerne un peu différent
+      const late = smooth(0.6 + 0.22 * rv, 0.95, f) * (1 - smooth(0.98, 1, f));
+      const fiber = 0.6 * vnoise(u * 7, v * 230, 13) + 0.4 * vnoise(u * 3, v * 90, 14) - 0.5;
+      const pore = smooth(0.8, 0.9, vnoise(u * 80, v * 420, 19)) * (1 - smooth(0.1, 0.35, f)) * (0.5 + 0.5 * rw);
+      const ray = smooth(0.88, 0.95, vnoise(u * 24, v * 300, 23));
+      const stain = fbm(u * 2, v * 2, 2, 29) - 0.5;
+      col[i] = 0.93 - 0.1 * rv - 0.4 * late - 0.12 * smooth(0.3, 0.7, f) + 0.2 * fiber - 0.3 * pore + 0.06 * ray + 0.1 * stain;
+      rgh[i] = 0.55 - 0.15 * late + 0.3 * pore - 0.08 * ray + 0.1 * fiber;
+      hgt[i] = 0.5 - 0.45 * pore + 0.1 * fiber;
+    }
+  } else if (kind === 'stone') {
+    // Granit poli : petits cristaux (Voronoï déformé) de feldspath clair, quartz gris
+    // et mica noir, parsemés de gros cristaux de feldspath ; joints un peu creux et plus mats.
+    let d1, d2, id;
+    const voro = (px, py, s) => {
+      const cx = Math.floor(px), cy = Math.floor(py);
+      d1 = d2 = 9; id = 0;
+      for (let j = -1; j <= 1; j++) for (let k = -1; k <= 1; k++) {
+        const gx = cx + k, gy = cy + j;
+        const dx = gx + hash2(gx, gy, s) - px, dy = gy + hash2(gx, gy, s + 1) - py, d = dx * dx + dy * dy;
+        if (d < d1) { d2 = d1; d1 = d; id = gx * 7919 + gy; } else if (d < d2) d2 = d;
+      }
+      return smooth(0, 0.1, Math.sqrt(d2) - Math.sqrt(d1));
+    };
+    for (let y = 0, i = 0; y < S; y++) for (let x = 0; x < S; x++, i++) {
+      const u = x / S, v = y / S;
+      const wu = u + 0.035 * (fbm(u * 5, v * 5, 2, 5) - 0.5) + 0.008 * (vnoise(u * 60, v * 60, 7) - 0.5);
+      const wv = v + 0.035 * (fbm(u * 5 + 9, v * 5, 2, 6) - 0.5) + 0.008 * (vnoise(u * 60 + 3, v * 60, 8) - 0.5);
+      // gros cristaux (phénocristaux) : une cellule grossière sur cinq
+      const bigEdge = voro(wu * 22, wv * 22, 31), big = hash2(id, 7, 8) < 0.2, bigShade = hash2(id, 9, 10);
+      let edge = voro(wu * 80, wv * 80, 1);
+      const m = 0.8 * hash2(id, 3, 4) + 0.2 * vnoise(u * 7, v * 7, 9), shade = hash2(id, 5, 6);
+      const fine = vnoise(u * 170, v * 170, 8) - 0.5, mott = vnoise(u * 3, v * 3, 10) - 0.5;
+      let c, r, h;
+      if (big) { c = 0.8 + 0.18 * bigShade + 0.05 * fine; r = 0.36; h = 0.54; edge = bigEdge; }   // feldspath (gros)
+      else if (m < 0.2) { c = 0.14 + 0.14 * shade; r = 0.22; h = 0.46; }        // mica / biotite
+      else if (m < 0.48) { c = 0.42 + 0.2 * shade; r = 0.28; h = 0.56; }        // quartz
+      else { c = 0.7 + 0.3 * shade; r = 0.4; h = 0.52; }                       // feldspath
+      col[i] = (c + 0.07 * fine + 0.06 * mott) * (0.85 + 0.15 * edge);
+      rgh[i] = r + 0.25 * (1 - edge) + 0.08 * fine;
+      hgt[i] = h * (0.65 + 0.35 * edge) + 0.06 * fine;
+    }
+  } else if (kind === 'metal') {
+    // Métal brossé : stries le long de u, voile de polissage, puis micro-rayures
+    for (let y = 0, i = 0; y < S; y++) for (let x = 0; x < S; x++, i++) {
+      const u = x / S, v = y / S;
+      const s = 0.5 * vnoise(u * 5, v * 250, 21) + 0.3 * vnoise(u * 9, v * 120, 22) + 0.2 * vnoise(u * 2, v * 50, 23);
+      const blot = fbm(u * 3, v * 3, 3, 4) - 0.5;
+      col[i] = 0.86 + 0.16 * (s - 0.5) + 0.08 * blot;
+      rgh[i] = 0.4 + 0.14 * (s - 0.5) + 0.1 * blot;
+      hgt[i] = 0.5 + 0.25 * (s - 0.5);
+      mtl[i] = 1;
+    }
+    strokes = { n: 140, along: 0.6, col: 'rgba(255,255,255,0.10)', dat: 'rgba(70,175,255,0.35)' };
+  } else if (kind === 'resin') {
+    // Plastique moulé : pigment très légèrement nuageux, grain fin, lustre irrégulier
+    for (let y = 0, i = 0; y < S; y++) for (let x = 0; x < S; x++, i++) {
+      const u = x / S, v = y / S;
+      const cl = fbm(u * 3, v * 3, 3, 1), fine = vnoise(u * 200, v * 200, 2) - 0.5;
+      col[i] = 0.97 - 0.06 * cl + 0.02 * fine;
+      rgh[i] = 0.26 + 0.08 * (fbm(u * 12, v * 12, 3, 3) - 0.5) + 0.05 * fine;
+      hgt[i] = 0.5 + 0.3 * fine;
+    }
+    strokes = { n: 60, along: 0, col: 'rgba(255,255,255,0.035)', dat: 'rgba(90,150,0,0.25)' };
+  } else if (kind === 'sparkle') {
+    // Paillettes : petites écailles plates orientées au hasard. Leur normale propre
+    // les fait scintiller seulement sous le bon angle ; presque opaques et métalliques.
+    // Ici la carte « couleur » sert de masque (émission très faible des paillettes).
+    nrm = new Float32Array(N * 2);
+    col.fill(0);
+    hgt.fill(1);              // R = transmission (1 = verre, 0 = paillette)
+    rgh.fill(0.06);
+    const C = 7, n = Math.ceil(S / C);
+    for (let gy = 0; gy < n; gy++) for (let gx = 0; gx < n; gx++) {
+      if (hash2(gx, gy, 51) > 0.6) continue;
+      const fx = (gx + 0.2 + 0.6 * hash2(gx, gy, 52)) * C, fy = (gy + 0.2 + 0.6 * hash2(gx, gy, 53)) * C;
+      const rad = 1.1 + 1.4 * hash2(gx, gy, 54), ang = 6.283 * hash2(gx, gy, 55);
+      const tilt = 0.8 * Math.sqrt(hash2(gx, gy, 56)), az = 6.283 * hash2(gx, gy, 57);
+      const nx = Math.sin(tilt) * Math.cos(az), ny = Math.sin(tilt) * Math.sin(az);
+      const ca = Math.cos(ang), sa = Math.sin(ang), bright = 0.5 + 0.5 * hash2(gx, gy, 58);
+      for (let y = Math.floor(fy - rad - 1); y <= fy + rad + 1; y++) for (let x = Math.floor(fx - rad - 1); x <= fx + rad + 1; x++) {
+        if (x < 0 || y < 0 || x >= S || y >= S) continue;
+        const dx = x + 0.5 - fx, dy = y + 0.5 - fy;
+        const a = Math.abs(dx * ca + dy * sa), b = Math.abs(-dx * sa + dy * ca);
+        if (Math.max(a, (a + b * 1.732) / 2) > rad) continue;   // hexagone
+        const i = y * S + x;
+        nrm[2 * i] = nx; nrm[2 * i + 1] = ny;
+        hgt[i] = 0.2; rgh[i] = 0.14; mtl[i] = 0.85; col[i] = bright;
+      }
+    }
   }
-  g.putImageData(img, 0, 0);
-  const tex = new THREE.CanvasTexture(c);
-  tex.colorSpace = THREE.SRGBColorSpace;
-  tex.anisotropy = 8;
-  return (patternCache[kind] = tex);
+
+  // Écriture des canvas
+  const gc = cCol.getContext('2d'), gd = cDat.getContext('2d');
+  const ic = gc.createImageData(S, S), id = gd.createImageData(S, S);
+  const dc = ic.data, dd = id.data;
+  for (let i = 0, o = 0; i < N; i++, o += 4) {
+    const b = clamp01(col[i]) * 255;
+    dc[o] = dc[o + 1] = dc[o + 2] = b; dc[o + 3] = 255;
+    dd[o] = clamp01(hgt[i]) * 255; dd[o + 1] = clamp01(rgh[i]) * 255; dd[o + 2] = mtl[i] * 255; dd[o + 3] = 255;
+  }
+  gc.putImageData(ic, 0, 0); gd.putImageData(id, 0, 0);
+  if (strokes) {
+    // Micro-rayures : courtes lignes courbes, surtout dans le sens du brossage
+    let seed = 0;
+    const rnd = () => hash2(seed++, 77, 99);
+    gc.lineCap = gd.lineCap = 'round';
+    for (let k = 0; k < strokes.n; k++) {
+      const x0 = rnd() * S, y0 = rnd() * S, len = 15 + 110 * rnd() * rnd();
+      const a = rnd() < strokes.along ? (rnd() - 0.5) * 0.35 : rnd() * 6.28;
+      const x1 = x0 + Math.cos(a) * len, y1 = y0 + Math.sin(a) * len;
+      const bx = (x0 + x1) / 2 + (rnd() - 0.5) * len * 0.2, by = (y0 + y1) / 2 + (rnd() - 0.5) * len * 0.2;
+      const w = 0.5 + 0.8 * rnd();
+      for (const [g, s] of [[gc, strokes.col], [gd, strokes.dat]]) {
+        g.strokeStyle = s; g.lineWidth = w;
+        g.beginPath(); g.moveTo(x0, y0); g.quadraticCurveTo(bx, by, x1, y1); g.stroke();
+      }
+    }
+  }
+  const map = new THREE.CanvasTexture(cCol);
+  map.colorSpace = THREE.SRGBColorSpace;
+  const data = new THREE.CanvasTexture(cDat);          // données linéaires (pas de sRGB)
+  let normalMap = null;
+  if (nrm) {
+    const cN = mk(), gn = cN.getContext('2d'), inn = gn.createImageData(S, S), dn = inn.data;
+    for (let i = 0, o = 0; i < N; i++, o += 4) {
+      const nx = nrm[2 * i], ny = nrm[2 * i + 1], nz = Math.sqrt(Math.max(0, 1 - nx * nx - ny * ny));
+      dn[o] = (nx * 0.5 + 0.5) * 255; dn[o + 1] = (ny * 0.5 + 0.5) * 255; dn[o + 2] = (nz * 0.5 + 0.5) * 255; dn[o + 3] = 255;
+    }
+    gn.putImageData(inn, 0, 0);
+    normalMap = new THREE.CanvasTexture(cN);
+    // pas de mipmap linéaire flou : les paillettes doivent rester nettes de près
+    normalMap.minFilter = THREE.LinearMipmapNearestFilter;
+  }
+  for (const t of [map, data, normalMap]) if (t) t.anisotropy = 8;
+  return (patternCache[kind] = { map, data, normalMap });
 }
+function patternTexture(kind) { return patternMaps(kind).map; }
 
 function bodyColor(type) {
   const st = STYLES[styleKey];
@@ -415,10 +565,11 @@ function labelMaterial(type, text) {
   const st = STYLES[styleKey], t = labelTextures(text);
   return new THREE.MeshPhysicalMaterial({
     color: TYPES[type].ink,
-    map: st.pattern && !st.glass ? patternTexture1(st.pattern) : null,
+    map: st.labelMap ? patternTexture1(st.pattern) : null,
     alphaMap: t.alpha, transparent: true,
     normalMap: t.normalMap, normalScale: new THREE.Vector2(1.5, 1.5),
     aoMap: t.ao, aoMapIntensity: 1,
+    // peinture du fond de gravure : un peu plus mate que le corps (sauf sur le métal, laissé nu)
     roughness: Math.min(1, (st.roughness ?? 0.4) + 0.15), metalness: st.metalness || 0,
     envMapIntensity: st.envIntensity || 1,
     polygonOffset: true, polygonOffsetFactor: -2, depthWrite: false,
@@ -433,24 +584,35 @@ function dieMaterial(type) {
   if (st.glass) {
     // Verre / résine translucide : la lumière traverse le dé et se teinte avec l'épaisseur
     const base = new THREE.Color(TYPES[type].color), white = new THREE.Color('#ffffff');
-    return new THREE.MeshPhysicalMaterial({
+    const m = new THREE.MeshPhysicalMaterial({
       color: base.clone().lerp(white, st.whiten),
       transmission: st.transmission, thickness: st.thickness, ior: 1.5,
       attenuationColor: base, attenuationDistance: st.attDist,
       roughness: st.roughness, metalness: 0,
-      clearcoat: 1, clearcoatRoughness: 0.04, specularIntensity: 1,
-      emissive: st.sparkle ? base.clone().lerp(white, 0.7) : new THREE.Color('#000000'),
-      emissiveMap: st.sparkle ? patternTexture('sparkle') : null,
-      emissiveIntensity: st.sparkle ? 1.4 : 0,
+      clearcoat: 1, clearcoatRoughness: 0.03, specularIntensity: 1,
     });
+    if (st.sparkle) {
+      // Paillettes réfléchissantes sous un vernis lisse : elles s'allument selon l'angle
+      const P = patternMaps(st.pattern);
+      Object.assign(m, {
+        normalMap: P.normalMap, normalScale: new THREE.Vector2(1, 1),
+        roughness: 1, roughnessMap: P.data, metalness: 1, metalnessMap: P.data,
+        transmissionMap: P.data,
+        emissive: base.clone().lerp(white, 0.5), emissiveMap: P.map, emissiveIntensity: 0.35,
+      });
+    }
+    return m;
   }
   const color = bodyColor(type);
-  const tex = st.pattern ? patternTexture(st.pattern) : null;
+  const P = st.pattern ? patternMaps(st.pattern) : null;
   return new THREE.MeshPhysicalMaterial({
-    color, map: tex,
-    bumpMap: st.bump ? tex : null, bumpScale: st.bump || 0,
-    roughness: st.roughness, metalness: st.metalness || 0,
-    clearcoat: st.clearcoat || 0, clearcoatRoughness: 0.12,
+    color, map: P ? P.map : null,
+    bumpMap: P && st.bump ? P.data : null, bumpScale: st.bump || 0,
+    roughness: P ? 1 : st.roughness, roughnessMap: P ? P.data : null,
+    metalness: P ? 1 : (st.metalness || 0), metalnessMap: P ? P.data : null,
+    clearcoat: st.clearcoat || 0, clearcoatRoughness: st.ccRough ?? 0.12,
+    // métal brossé : les stries suivent u, le reflet s'étire en travers (le long de la bitangente)
+    anisotropy: st.anisotropy || 0, anisotropyRotation: Math.PI / 2,
     envMapIntensity: st.envIntensity || 1,
   });
 }
