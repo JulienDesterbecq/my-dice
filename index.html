@@ -430,7 +430,7 @@ const STYLES = {
   marbre: { name: 'Marbre', pattern: 'marble', roughness: 0.18, clearcoat: 1, ccRough: 0.03 },
   bois:   { name: 'Bois',   pattern: 'wood',  bump: 0.5, roughness: 0.55, clearcoat: 0.35, ccRough: 0.32, tint: ['#a8743f', 0.55] },
   pierre: { name: 'Pierre', pattern: 'stone', bump: 0.5, roughness: 0.5, clearcoat: 0.15, ccRough: 0.25, tint: ['#9a958c', 0.45] },
-  metal:  { name: 'Métal',  pattern: 'metal', bump: 0.5, roughness: 0.4, metalness: 1, envIntensity: 2.6, anisotropy: 0.55, tint: ['#c8ccd2', 0.35] },
+  metal:  { name: 'Métal',  pattern: 'metal', bump: 0.5, roughness: 0.4, metalness: 1, envIntensity: 1.3, anisotropy: 0.55, tint: ['#c8ccd2', 0.35] },
   resine: { name: 'Résine', pattern: 'resin', bump: 0.25, roughness: 0.3, clearcoat: 0.45, ccRough: 0.1 },
   verre:  { name: 'Verre', glass: true, roughness: 0.03, transmission: 0.9, thickness: 0.8, attDist: 1.2, whiten: 0.4 },
   paillettes: { name: 'Paillettes', glass: true, pattern: 'sparkle', roughness: 0.2, transmission: 0.8, thickness: 0.8, attDist: 1.0, whiten: 0.3, sparkle: true },
@@ -499,7 +499,7 @@ function patternMaps(kind) {
       const warp = fbm(u * 2.5, v * 4, 3, 3) - 0.5;
       // plan de coupe légèrement incliné par rapport au tronc : arcs « en cathédrale »
       const dist = Math.hypot(v - 0.5 + 0.06 * warp, 0.1 + 0.22 * u);
-      const rp = dist * 34 + warp * 1.2 + 0.12 * (vnoise(u * 2, v * 30, 5) - 0.5);
+      const rp = dist * 56 + warp * 1.2 + 0.12 * (vnoise(u * 2, v * 30, 5) - 0.5);
       const ri = Math.floor(rp), f = rp - ri;
       const rv = hash2(ri, 0, 41), rw = hash2(ri, 1, 42);      // chaque cerne un peu différent
       const late = smooth(0.6 + 0.22 * rv, 0.95, f) * (1 - smooth(0.98, 1, f));
@@ -530,8 +530,8 @@ function patternMaps(kind) {
       const wu = u + 0.035 * (fbm(u * 5, v * 5, 2, 5) - 0.5) + 0.008 * (vnoise(u * 60, v * 60, 7) - 0.5);
       const wv = v + 0.035 * (fbm(u * 5 + 9, v * 5, 2, 6) - 0.5) + 0.008 * (vnoise(u * 60 + 3, v * 60, 8) - 0.5);
       // gros cristaux (phénocristaux) : une cellule grossière sur cinq
-      const bigEdge = voro(wu * 22, wv * 22, 31), big = hash2(id, 7, 8) < 0.2, bigShade = hash2(id, 9, 10);
-      let edge = voro(wu * 80, wv * 80, 1);
+      const bigEdge = voro(wu * 36, wv * 36, 31), big = hash2(id, 7, 8) < 0.2, bigShade = hash2(id, 9, 10);
+      let edge = voro(wu * 120, wv * 120, 1);
       const m = 0.8 * hash2(id, 3, 4) + 0.2 * vnoise(u * 7, v * 7, 9), shade = hash2(id, 5, 6);
       const fine = vnoise(u * 170, v * 170, 8) - 0.5, mott = vnoise(u * 3, v * 3, 10) - 0.5;
       let c, r, h;
@@ -650,7 +650,17 @@ function bodyColor(type) {
 // Texture de matière lue via uv1 (coordonnées de la face) pour les chiffres
 const patternUV1 = {};
 function patternTexture1(kind) {
-  if (!patternUV1[kind]) { const t = patternTexture(kind).clone(); t.channel = 1; t.needsUpdate = true; patternUV1[kind] = t; }
+  if (!patternUV1[kind]) {
+    // version éclaircie de la matière : on la devine dans le creux sans nuire à la lisibilité
+    const src = patternTexture(kind).image, c = document.createElement('canvas');
+    c.width = src.width; c.height = src.height;
+    const g = c.getContext('2d');
+    g.drawImage(src, 0, 0);
+    g.globalAlpha = 0.65; g.fillStyle = '#fff'; g.fillRect(0, 0, c.width, c.height);
+    const t = new THREE.CanvasTexture(c);
+    t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4; t.channel = 1;
+    patternUV1[kind] = t;
+  }
   return patternUV1[kind];
 }
 
@@ -753,13 +763,13 @@ function templateFor(type) {
     const u = verts[f.ids[0]].clone().sub(f.center).normalize();
     return {
       u, w: new THREE.Vector3().crossVectors(f.normal, u),
-      ou: 0.3 + 0.4 * frac(Math.sin(fi * 12.9898 + 1) * 43758.5453),
-      ow: 0.3 + 0.4 * frac(Math.sin(fi * 78.233 + 2) * 43758.5453),
+      ou: 0.4 + 0.2 * frac(Math.sin(fi * 12.9898 + 1) * 43758.5453),
+      ow: 0.4 + 0.2 * frac(Math.sin(fi * 78.233 + 2) * 43758.5453),
     };
   });
   const uvOf = (fi, p) => {
     const F = faceUV[fi], d = p.clone().sub(faces[fi].center);
-    return [F.ou + d.dot(F.u) * 0.22, F.ow + d.dot(F.w) * 0.22];
+    return [F.ou + d.dot(F.u) * 0.35, F.ow + d.dot(F.w) * 0.35];   // grain à l'échelle d'un vrai dé
   };
 
   const pos = [], nor = [], uv = [];
